@@ -56,12 +56,12 @@ flowchart TD
 
     WEBUI["🖥️ Web UI"] <-->|"REST / WebSocket"| API
 
-    style DSP fill:#0d1f2d,stroke:#2ec4b6,color:#fff
-    style LCH fill:#0d1a2d,stroke:#4a9eff,color:#fff
-    style RCH fill:#0d1a2d,stroke:#4a9eff,color:#fff
-    style API fill:#1a1200,stroke:#f4a261,color:#f4a261
+    style DSP fill:#dddfed,stroke:#2ec4b6,color:#333
+    style LCH fill:#dddaed,stroke:#4a9eff,color:#333
+    style RCH fill:#dddaed,stroke:#4a9eff,color:#333
+    style API fill:#bdbacd,stroke:#947221,color:#333
     style WEBUI fill:#1a1200,stroke:#f4a261,color:#f4a261
-    style AP fill:#0d1f3a,stroke:#4a9eff,color:#4a9eff
-    style PIPE fill:#0d1f3a,stroke:#4a9eff,color:#7ab3e0
-    style DAC fill:#0d1f3a,stroke:#2ec4b6,color:#2ec4b6
+    style AP fill:#7d9faa,stroke:#4a9eff,color:#fff
+    style PIPE fill:#7d9faa,stroke:#4a9eff,color:#fff
+    style DAC fill:#7d9faa,stroke:#2ec4b6,color:#fff
 ```
