@@ -150,3 +150,26 @@ aplay -f S32_LE -r 44100 -c 2 /tmp/shairport-sync-audio
 # sudo apt install sox
 play -t raw --buffer 8192 -r 44100 -e signed -b 32 -c 2 -L /tmp/shairport-sync-audio
 ```
+
+### Architecture
+
+Reader/resampler thread:
+
+Reads S32LE interleaved stereo from pipe at 44.1 kHz
+Accumulates exactly RESAMPLE_CHUNK (1024) frames before processing
+Converts i32 to f64 and de-interleaves into per-channel buffers
+Before each process() call, computes buffer fill level and adjusts the resampling ratio via set_resample_ratio_relative()
+Resamples 44.1 kHz to 96 kHz using SincFixedIn with sinc interpolation (256-tap, linear interp, BlackmanHarris2 window)
+Pushes resampled i32 samples into the lock-free rtrb ring buffer
+CPAL output callback (src/main.rs:135-141):
+
+Configured at 96 kHz stereo
+Simply pops samples from ring buffer (lock-free, real-time safe)
+Buffer-state-driven speed control (src/main.rs:108-111):
+
+fill = 1.0 - producer.slots() / capacity gives current fill ratio (0.0-1.0)
+Proportional controller: rel_ratio = 1.0 + (0.5 - fill) * ADJUST_GAIN
+Fill > 50% --> ratio decreases slightly --> fewer output samples --> buffer drains
+Fill < 50% --> ratio increases slightly --> more output samples --> buffer fills
+Clamped within the resampler's allowed range (1/1.01 to 1.01, i.e. +/-1%)
+ADJUST_GAIN (0.0005) controls responsiveness -- increase for faster convergence, decrease for smoother output

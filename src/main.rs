@@ -7,6 +7,7 @@ use rubato::{
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::thread;
+use std::time::Instant;
 
 const INPUT_RATE: u32 = 44100;
 const OUTPUT_RATE: u32 = 96000;
@@ -69,6 +70,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let frame_bytes = CHANNELS * 4;
         let chunk_bytes = RESAMPLE_CHUNK * frame_bytes;
         let mut leftover = 0usize;
+        let mut last_status = Instant::now();
+        let mut chunks_processed: u64 = 0;
+        let mut fill_sum: f64 = 0.0;
+        let mut fill_min: f64 = 1.0;
+        let mut fill_max: f64 = 0.0;
 
         loop {
             let target = chunk_bytes - leftover;
@@ -107,6 +113,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let error = FILL_TARGET - fill;
             let rel_ratio = (1.0 + error * ADJUST_GAIN).clamp(1.0 / 1.01, 1.01);
             let _ = resampler.set_resample_ratio_relative(rel_ratio, false);
+
+            chunks_processed += 1;
+            fill_sum += fill;
+            if fill < fill_min { fill_min = fill; }
+            if fill > fill_max { fill_max = fill; }
+
+            if last_status.elapsed().as_secs() >= 1 {
+                let fill_avg = fill_sum / chunks_processed as f64;
+                let effective_ratio = BASE_RATIO * rel_ratio;
+                eprintln!(
+                    "[buf] fill: {:.1}% (avg {:.1}%, min {:.1}%, max {:.1}%) | ratio: {:.6} | chunks: {}",
+                    fill * 100.0,
+                    fill_avg * 100.0,
+                    fill_min * 100.0,
+                    fill_max * 100.0,
+                    effective_ratio,
+                    chunks_processed,
+                );
+                fill_sum = 0.0;
+                fill_min = 1.0;
+                fill_max = 0.0;
+                chunks_processed = 0;
+                last_status = Instant::now();
+            }
 
             let output = match resampler.process(&input_buf, None) {
                 Ok(out) => out,
