@@ -5,12 +5,12 @@
 ```mermaid
 flowchart TD
     AP["🎵 AirPlay2 Source\nShairPort / NQPTP"]
-    PIPE["Unix Pipe — stdin\nPCM Stereo f32"]
+    PIPE["Unix Pipe — stdin\nPCM Stereo i32"]
 
     AP -->|"PCM stereo stream"| PIPE
 
     subgraph DSP["DSP Audio Server (Rust)"]
-        IN["Input Stage\nStereo L/R · f32 PCM · ring buffer"]
+        IN["Input Stage\nStereo L/R · i32 PCM · ring buffer"]
         FIR["Crossover Engine · FIR Filter Bank\nlinear phase · overlap-save convolution"]
 
         IN --> FIR
@@ -102,7 +102,7 @@ make install
 git clone https://github.com/mikebrady/shairport-sync.git
 cd shairport-sync
 autoreconf -fi
-./configure --sysconfdir=/etc --with-alsa --with-soxr --with-avahi --with-ssl=openssl --with-systemd-startup --with-airplay-2 --with-pipe
+./configure --sysconfdir=/etc --with-alsa --with-soxr --with-avahi --with-ssl=openssl --with-systemd-startup --with-airplay-2 --with-pipe --with-metadata
 make
 sudo make install
 ```
@@ -182,11 +182,11 @@ play -t raw --buffer 8192 -r 48000 -e signed -b 32 -c 2 -L /tmp/shairport-sync-a
 
 Reader/resampler thread:
 
-Reads S32LE interleaved stereo from pipe at 44.1 kHz
+Reads S32LE interleaved stereo from pipe at 48 kHz
 Accumulates exactly RESAMPLE_CHUNK (1024) frames before processing
 Converts i32 to f64 and de-interleaves into per-channel buffers
 Before each process() call, computes buffer fill level and adjusts the resampling ratio via set_resample_ratio_relative()
-Resamples 44.1 kHz to 96 kHz using SincFixedIn with sinc interpolation (256-tap, linear interp, BlackmanHarris2 window)
+Resamples 48 kHz to 96 kHz using SincFixedIn with sinc interpolation (256-tap, linear interp, BlackmanHarris2 window)
 Pushes resampled i32 samples into the lock-free rtrb ring buffer
 CPAL output callback (src/main.rs:135-141):
 
