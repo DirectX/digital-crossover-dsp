@@ -261,6 +261,7 @@ dependencies = [
  "axum",
  "base64",
  "cpal",
+ "libc",
  "rtrb",
  "rubato",
  "serde",

@@ -2,15 +2,17 @@ use axum::{Json, Router, routing::post};
 use base64::prelude::*;
 use cpal::StreamConfig;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use libc;
 use rtrb::RingBuffer;
 use serde::Deserialize;
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
-use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::io::{BufRead, BufReader};
+use std::os::unix::io::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::thread;
 use std::time::Instant;
 use tokio::net::TcpListener;
@@ -31,6 +33,17 @@ const FILL_TARGET: f64 = 0.5;
 // PI terms
 const P_GAIN: f64 = 0.002;
 const I_GAIN: f64 = 0.00005;
+const POLL_TIMEOUT_MS: i32 = 200;
+
+fn poll_readable(fd: i32, timeout_ms: i32) -> bool {
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    ret > 0 && (pfd.revents & libc::POLLIN) != 0
+}
 
 // --- Your Audio Config Data ---
 #[derive(Clone, Debug, Deserialize)]
@@ -114,6 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let mut file = OpenOptions::new()
                 .read(true)
+                .custom_flags(libc::O_NONBLOCK)
                 .open(PIPE_PATH)
                 .expect("Failed to open pipe");
 
@@ -148,6 +162,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if dsp_token.is_cancelled() {
                     break;
                 }
+                if !poll_readable(file.as_raw_fd(), POLL_TIMEOUT_MS) {
+                    continue;
+                }
                 let target = chunk_bytes - leftover;
                 match file.read(&mut raw_buf[leftover..leftover + target]) {
                     Ok(0) => {
@@ -159,6 +176,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if leftover < chunk_bytes {
                             continue;
                         }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        continue;
                     }
                     Err(e) => {
                         eprintln!("Read error: {e}");
@@ -289,7 +309,11 @@ pub fn spawn_metadata_thread(token: CancellationToken) {
                 continue;
             }
 
-            let file = match File::open(METADATA_PATH) {
+            let file = match OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(METADATA_PATH)
+            {
                 Ok(f) => f,
                 Err(e) => {
                     eprintln!("Failed to open metadata pipe: {}", e);
@@ -298,12 +322,16 @@ pub fn spawn_metadata_thread(token: CancellationToken) {
                 }
             };
 
+            let fd = file.as_raw_fd();
             let mut reader = BufReader::new(file);
             let mut buffer = String::new();
 
             loop {
                 if token.is_cancelled() {
                     return;
+                }
+                if !poll_readable(fd, POLL_TIMEOUT_MS) {
+                    continue;
                 }
                 let mut line = String::new();
                 match reader.read_line(&mut line) {
@@ -324,6 +352,9 @@ pub fn spawn_metadata_thread(token: CancellationToken) {
                             // Remove processed item from buffer
                             buffer = buffer[item_len..].to_string();
                         }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        continue;
                     }
                     Err(e) => {
                         eprintln!("Metadata reader error: {}", e);
