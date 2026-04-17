@@ -124,7 +124,7 @@ ExecStart=/usr/local/bin/shairport-sync -o pipe
 
 ```shell
 sudo systemctl daemon-reload
-sudo systemctl restart shairport-sync
+systemctl --user restart shairport-sync
 ```
 
 ##### ShairPort Sync Config
