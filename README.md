@@ -109,6 +109,26 @@ sudo make install
 
 #### Configuration
 
+##### Service Config
+
+```shell
+systemctl --user edit shairport-sync
+```
+
+```shell
+[Service]
+PrivateTmp=false
+ExecStart=
+ExecStart=/usr/local/bin/shairport-sync -o pipe
+```
+
+```shell
+sudo systemctl daemon-reload
+sudo systemctl restart shairport-sync
+```
+
+##### ShairPort Sync Config
+
 ```shell
 sudo nano /etc/shairport-sync.conf
 ```
@@ -120,13 +140,20 @@ eneral = {
   ignore_volume_control = "yes";
 };
 
-// Отключаем вывод на системное устройство, используем pipe
 alsa = {
   // Disabling system audio output
 };
 
 pipe = {
   name = "/tmp/shairport-sync-audio";  // UNIX pipe path
+};
+
+metadata =
+{
+    enabled = "yes"; // Set this to "yes" to get Shairport Sync to solicit metadata from the source and pass it on via a pipe
+    include_cover_art = "yes"; // Set to "yes" to get cover art. "no" is the default.
+    pipe_name = "/tmp/shairport-sync-metadata"; // The default name of the pipe where metadata is written.
+    pipe_timeout = 5000; // Wait for this many milliseconds before giving up trying to write into the pipe.
 };
 ```
 
