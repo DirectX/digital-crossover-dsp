@@ -91,7 +91,7 @@ fn process_metadata_item(item: &str, state: &SharedState) {
         if let Some(b64) = data_b64 {
             let b64_clean = b64.replace("\n", "").replace("\r", "").replace(" ", "");
             if let Ok(decoded_bytes) = BASE64_STANDARD.decode(&b64_clean) {
-                let val = String::from_utf8_lossy(&decoded_bytes).trim().to_string();
+                let val = sanitize_metadata(&String::from_utf8_lossy(&decoded_bytes));
                 if !val.is_empty() {
                     let mut s = state.lock().unwrap();
                     match c.as_str() {
@@ -139,4 +139,23 @@ fn hex_to_ascii(hex: &str) -> String {
         }
     }
     ascii
+}
+
+fn sanitize_metadata(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(*c,
+                    '\u{200B}'..='\u{200F}'
+                    | '\u{2028}'..='\u{202F}'
+                    | '\u{2060}'..='\u{206F}'
+                    | '\u{FE00}'..='\u{FE0F}'
+                    | '\u{FFF0}'..='\u{FFFF}'
+                    | '\u{E0100}'..='\u{E01EF}'
+                    | '\u{1F170}'..='\u{1F1FF}'
+                )
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
