@@ -3,39 +3,70 @@ mod dsp;
 mod metadata;
 mod pipe;
 mod server;
+mod tui;
 
+use std::sync::{Arc, Mutex};
 use std::thread;
+use clap::{Parser, Subcommand};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use config::AudioRuntimeConfig;
+use config::{AppState, AudioRuntimeConfig};
+
+#[derive(Parser)]
+#[command(name = "digital-crossover-dsp")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    Run,
+    Tui {
+        #[arg(short, long, default_value = "http://127.0.0.1:3000")]
+        url: String,
+    },
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let token = CancellationToken::new();
+    let cli = Cli::parse();
 
-    let initial_config = AudioRuntimeConfig {
-        filter_cutoff: 0.95,
-        volume: 1.0,
-    };
-    let (config_tx, config_rx) = watch::channel(initial_config);
+    match cli.command {
+        Commands::Run => {
+            let token = CancellationToken::new();
+            let state = Arc::new(Mutex::new(AppState::default()));
 
-    metadata::spawn_thread(token.clone());
+            let initial_config = AudioRuntimeConfig {
+                filter_cutoff: 0.95,
+                volume: 1.0,
+            };
+            let (config_tx, config_rx) = watch::channel(initial_config);
 
-    let dsp_token = token.clone();
-    let dsp_handle = thread::spawn(move || {
-        dsp::run(dsp_token, config_rx);
-    });
+            metadata::spawn_thread(token.clone(), state.clone());
 
-    server::spawn(token.clone(), config_tx).await;
+            let dsp_token = token.clone();
+            let dsp_state = state.clone();
+            let dsp_handle = thread::spawn(move || {
+                dsp::run(dsp_token, config_rx, dsp_state);
+            });
 
-    tokio::signal::ctrl_c().await?;
-    println!("\nShutdown signal received...");
+            server::spawn(token.clone(), config_tx, state.clone()).await;
 
-    token.cancel();
+            tokio::signal::ctrl_c().await?;
+            println!("\nShutdown signal received...");
 
-    let _ = dsp_handle.join();
+            token.cancel();
 
-    println!("Application gracefully shut down.");
+            let _ = dsp_handle.join();
+
+            println!("Application gracefully shut down.");
+        }
+        Commands::Tui { url } => {
+            tui::run(&url).await?;
+        }
+    }
+
     Ok(())
 }

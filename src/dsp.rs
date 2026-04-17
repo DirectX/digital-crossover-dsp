@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::*;
 use crate::pipe::poll_readable;
 
-pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntimeConfig>) {
+pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntimeConfig>, state: SharedState) {
     let host = cpal::default_host();
     let device = host.default_output_device().expect("No output device");
     println!("Output device: {}", device.name().unwrap());
@@ -159,15 +159,15 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
             if last_status.elapsed().as_secs() >= 1 {
                 let fill_avg = fill_sum / chunks_processed as f64;
                 let effective_ratio = BASE_RATIO * rel_ratio;
-                eprintln!(
-                    "[buf] fill: {:.1}% (avg {:.1}%, min {:.1}%, max {:.1}%) | ratio: {:.6} | chunks: {}",
-                    fill * 100.0,
-                    fill_avg * 100.0,
-                    fill_min * 100.0,
-                    fill_max * 100.0,
-                    effective_ratio,
-                    chunks_processed,
-                );
+                {
+                    let mut s = state.lock().unwrap();
+                    s.buffer_fill = fill * 100.0;
+                    s.buffer_fill_avg = fill_avg * 100.0;
+                    s.buffer_fill_min = fill_min * 100.0;
+                    s.buffer_fill_max = fill_max * 100.0;
+                    s.resample_ratio = effective_ratio;
+                    s.chunks_processed = chunks_processed;
+                }
                 fill_sum = 0.0;
                 fill_min = 1.0;
                 fill_max = 0.0;
