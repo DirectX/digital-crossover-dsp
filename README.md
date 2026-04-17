@@ -88,12 +88,12 @@ apt install --no-install-recommends build-essential git autoconf automake libtoo
 ##### NQPTP
 
 ```
-$ git clone https://github.com/mikebrady/nqptp.git
-$ cd nqptp
-$ autoreconf -fi # about a minute on a Raspberry Pi.
-$ ./configure --with-systemd-startup
-$ make
-# make install
+git clone https://github.com/mikebrady/nqptp.git
+cd nqptp
+autoreconf -fi # about a minute on a Raspberry Pi.
+./configure --with-systemd-startup
+make
+make install
 ```
 
 ##### ShairPort Sync
