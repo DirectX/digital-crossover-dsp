@@ -166,16 +166,16 @@ systemctl --user status shairport-sync
 #### Testing (possible jitter)
 
 ```
-ffplay -fflags nobuffer -f s32le -ar 44100 -ch_layout stereo /tmp/shairport-sync-audio
+ffplay -fflags nobuffer -f s32le -ar 48000 -ch_layout stereo /tmp/shairport-sync-audio
 ```
 
 ```
-aplay -f S32_LE -r 44100 -c 2 /tmp/shairport-sync-audio
+aplay -f S32_LE -r 48000 -c 2 /tmp/shairport-sync-audio
 ```
 
 ```
 # sudo apt install sox
-play -t raw --buffer 8192 -r 44100 -e signed -b 32 -c 2 -L /tmp/shairport-sync-audio
+play -t raw --buffer 8192 -r 48000 -e signed -b 32 -c 2 -L /tmp/shairport-sync-audio
 ```
 
 ### Architecture
