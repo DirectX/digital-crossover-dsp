@@ -1,20 +1,26 @@
 use crate::config::{AudioRuntimeConfig, OUTPUT_RATE};
 
-/// Output channel layout — ALSA surround51 stereo-compatible pairs.
-/// Each band occupies an L/R pair so stereo imaging is preserved per band.
+/// Output channel layout.
 ///
-///   0 = FL  (Front Left)   -> Mid  L
-///   1 = FR  (Front Right)  -> Mid  R
-///   2 = RL  (Rear  Left)   -> High L
-///   3 = RR  (Rear  Right)  -> High R
-///   4 = FC  (Center)       -> Low  L
-///   5 = LFE (Subwoofer)    -> Low  R
+/// Almost every 5.1 sink (HDMI receivers, USB DACs exposing 6ch, PipeWire,
+/// PulseAudio, WAVEFORMATEXTENSIBLE) uses this canonical interleaved order:
+///
+///   0 = FL   (Front Left)    -> Mid  L
+///   1 = FR   (Front Right)   -> Mid  R
+///   2 = FC   (Center)        -> Low  L
+///   3 = LFE  (Subwoofer)     -> Low  R
+///   4 = RL   (Rear  Left)    -> High L
+///   5 = RR   (Rear  Right)   -> High R
+///
+/// ALSA's legacy `surround51` device uses a different order (FL,FR,RL,RR,
+/// FC,LFE); do NOT open that device. Prefer `default`, `pipewire`, or a raw
+/// `hw:` node whose native order is the one above.
 pub const OUT_MID_L:  usize = 0;  // FL
 pub const OUT_MID_R:  usize = 1;  // FR
-pub const OUT_HIGH_L: usize = 2;  // RL
-pub const OUT_HIGH_R: usize = 3;  // RR
-pub const OUT_LOW_L:  usize = 4;  // FC
-pub const OUT_LOW_R:  usize = 5;  // LFE
+pub const OUT_LOW_L:  usize = 2;  // FC
+pub const OUT_LOW_R:  usize = 3;  // LFE
+pub const OUT_HIGH_L: usize = 4;  // RL
+pub const OUT_HIGH_R: usize = 5;  // RR
 
 /// Per-channel band splitter. Kept as a trait so alternate filter
 /// topologies can be swapped in without touching the DSP loop.
