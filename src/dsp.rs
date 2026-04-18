@@ -253,6 +253,7 @@ fn select_device(host: &cpal::Host) -> cpal::Device {
     fn is_hdmi(name: &str) -> bool {
         let n = name.to_ascii_lowercase();
         n.contains("hdmi") || n.contains("displayport") || n.contains("dp,")
+            || n.contains("nvidia") || n.contains("intel")
     }
 
     // Print all found devices for diagnostics.
