@@ -16,138 +16,172 @@ pub const OUT_HIGH_R: usize = 3;  // RR
 pub const OUT_LOW_L:  usize = 4;  // FC
 pub const OUT_LOW_R:  usize = 5;  // LFE
 
-/// FIR filter length. Odd so the center tap provides an exact integer-sample
-/// group delay of (NUM_TAPS-1)/2, which is required for the complementary
-/// subtraction trick that keeps the three bands phase-aligned and summing
-/// back to the input. 513 taps @ 96 kHz = ~2.7 ms latency and a transition
-/// band of roughly 400 Hz around the low cut — plenty for a 3-way crossover.
-const NUM_TAPS: usize = 513;
-
-/// Per-channel band splitter. Kept as a trait so real FIR/IIR filters
-/// can replace the trivial passthrough without touching the DSP loop.
+/// Per-channel band splitter. Kept as a trait so alternate filter
+/// topologies can be swapped in without touching the DSP loop.
 pub trait BandSplitter: Send {
-    /// Splits a single input sample into (low, mid, high) band components.
     fn split(&mut self, sample: f32) -> (f32, f32, f32);
 }
 
-/// Zero-cost placeholder that routes the full input signal into every band.
-/// Retained as a fallback; real splitting is done by [`FirBandSplitter`].
-#[allow(dead_code)]
-pub struct PassthroughSplitter;
+// ---------------------------------------------------------------------------
+// Biquad (Direct Form I, RBJ cookbook conventions)
+// ---------------------------------------------------------------------------
+//
+// A single 2nd-order IIR section. We cascade two Butterworth biquads per
+// band edge to build a Linkwitz-Riley 4th-order response (24 dB/oct).
+// LR4 is the de-facto standard for loudspeaker crossovers: minimum-phase
+// (no pre-ringing), -6 dB at the crossover point on both sides, and
+// adjacent bands sum to a flat all-pass magnitude response — exactly what
+// eliminates the comb-filter/hollow artifacts a linear-phase FIR produces
+// when its bands feed physically separated drivers.
 
-impl BandSplitter for PassthroughSplitter {
-    #[inline]
-    fn split(&mut self, sample: f32) -> (f32, f32, f32) {
-        (sample, sample, sample)
+#[derive(Clone, Copy)]
+struct Biquad {
+    b0: f32, b1: f32, b2: f32,
+    a1: f32, a2: f32,
+    x1: f32, x2: f32,
+    y1: f32, y2: f32,
+}
+
+impl Biquad {
+    #[allow(dead_code)]
+    fn identity() -> Self {
+        Self { b0: 1.0, b1: 0.0, b2: 0.0, a1: 0.0, a2: 0.0,
+               x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
+    }
+
+    /// 2nd-order Butterworth lowpass (Q = 1/√2). Two of these in series
+    /// give a Linkwitz-Riley 4th-order lowpass.
+    fn butterworth_lpf(fc: f32, fs: f32) -> Self {
+        use std::f32::consts::{PI, FRAC_1_SQRT_2};
+        let w0 = 2.0 * PI * fc / fs;
+        let (s, c) = w0.sin_cos();
+        // Q = 1/√2  ⇒  α = sin(w0) / (2Q) = sin(w0) / √2
+        let alpha = s * FRAC_1_SQRT_2;
+        let a0 =  1.0 + alpha;
+        let b0 = ((1.0 - c) * 0.5) / a0;
+        let b1 =  (1.0 - c) / a0;
+        let b2 = ((1.0 - c) * 0.5) / a0;
+        let a1 = (-2.0 * c) / a0;
+        let a2 =  (1.0 - alpha) / a0;
+        Self { b0, b1, b2, a1, a2, x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
+    }
+
+    /// 2nd-order Butterworth highpass (Q = 1/√2).
+    fn butterworth_hpf(fc: f32, fs: f32) -> Self {
+        use std::f32::consts::{PI, FRAC_1_SQRT_2};
+        let w0 = 2.0 * PI * fc / fs;
+        let (s, c) = w0.sin_cos();
+        let alpha = s * FRAC_1_SQRT_2;
+        let a0 =  1.0 + alpha;
+        let b0 =  ((1.0 + c) * 0.5) / a0;
+        let b1 = -(1.0 + c) / a0;
+        let b2 =  ((1.0 + c) * 0.5) / a0;
+        let a1 =  (-2.0 * c) / a0;
+        let a2 =   (1.0 - alpha) / a0;
+        Self { b0, b1, b2, a1, a2, x1: 0.0, x2: 0.0, y1: 0.0, y2: 0.0 }
+    }
+
+    #[inline(always)]
+    fn process(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+                            - self.a1 * self.y1 - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
     }
 }
 
-/// Linear-phase FIR 3-band splitter built from two windowed-sinc lowpasses.
-///
-/// Using two LPFs of identical length (hence identical group delay) lets us
-/// derive the mid band by subtraction and recover the high band from the
-/// delayed input. The three outputs sum back to `x[n - (NUM_TAPS-1)/2]`.
-pub struct FirBandSplitter {
-    h_low: Vec<f32>,        // lowpass @ low_cut_hz
-    h_mid: Vec<f32>,        // lowpass @ mid_cut_hz
-    delay: Vec<f32>,        // circular buffer of past input samples
-    pos: usize,             // write index (most recent sample lives here)
-    center: usize,          // (NUM_TAPS - 1) / 2
+/// Linkwitz-Riley 4th-order section = two cascaded Butterworth biquads.
+#[derive(Clone, Copy)]
+struct Lr4 { a: Biquad, b: Biquad }
+
+impl Lr4 {
+    fn lpf(fc: f32, fs: f32) -> Self {
+        Self { a: Biquad::butterworth_lpf(fc, fs), b: Biquad::butterworth_lpf(fc, fs) }
+    }
+    fn hpf(fc: f32, fs: f32) -> Self {
+        Self { a: Biquad::butterworth_hpf(fc, fs), b: Biquad::butterworth_hpf(fc, fs) }
+    }
+    #[allow(dead_code)]
+    fn identity() -> Self { Self { a: Biquad::identity(), b: Biquad::identity() } }
+    #[inline(always)]
+    fn process(&mut self, x: f32) -> f32 { self.b.process(self.a.process(x)) }
+}
+
+// ---------------------------------------------------------------------------
+// 3-way Linkwitz-Riley band splitter
+// ---------------------------------------------------------------------------
+//
+// Topology:
+//     low  = LPF_low (x)
+//     mid  = LPF_mid ( HPF_low (x) )      // band-pass via serial chain
+//     high = HPF_mid (x)
+//
+// Each LPF/HPF is LR4 (24 dB/oct). Summed magnitude of (low + mid + high)
+// is flat within a fraction of a dB; phase rotates smoothly through the
+// crossover region (no pre-echo, no comb filter). This is the classic
+// textbook 3-way LR layout used in every serious active loudspeaker.
+
+pub struct LrBandSplitter {
+    lpf_low:  Lr4,        // extracts the low band
+    hpf_low:  Lr4,        // feeds into the mid chain
+    lpf_mid:  Lr4,        // caps the mid band at the upper cut
+    hpf_mid:  Lr4,        // extracts the high band
     low_cut_hz: f32,
     mid_cut_hz: f32,
     sample_rate: f32,
 }
 
-impl FirBandSplitter {
+impl LrBandSplitter {
     pub fn new(low_cut_hz: f32, mid_cut_hz: f32, sample_rate: f32) -> Self {
         let (lo, mi) = sanitize_cuts(low_cut_hz, mid_cut_hz, sample_rate);
         Self {
-            h_low: design_lowpass(lo, sample_rate, NUM_TAPS),
-            h_mid: design_lowpass(mi, sample_rate, NUM_TAPS),
-            delay: vec![0.0; NUM_TAPS],
-            pos: 0,
-            center: (NUM_TAPS - 1) / 2,
+            lpf_low: Lr4::lpf(lo, sample_rate),
+            hpf_low: Lr4::hpf(lo, sample_rate),
+            lpf_mid: Lr4::lpf(mi, sample_rate),
+            hpf_mid: Lr4::hpf(mi, sample_rate),
             low_cut_hz: lo,
             mid_cut_hz: mi,
             sample_rate,
         }
     }
 
-    /// Rebuild coefficients in place when cutoffs change. Preserves the
-    /// delay-line history so there's no audible click on config updates.
+    /// Rebuild coefficients on cutoff changes. We replace only the affected
+    /// sections, keeping the filter state (x/y history) so there's no click.
     pub fn set_cutoffs(&mut self, low_cut_hz: f32, mid_cut_hz: f32) {
         let (lo, mi) = sanitize_cuts(low_cut_hz, mid_cut_hz, self.sample_rate);
         if (lo - self.low_cut_hz).abs() > f32::EPSILON {
-            self.h_low = design_lowpass(lo, self.sample_rate, NUM_TAPS);
+            update_lr_coeffs(&mut self.lpf_low, Biquad::butterworth_lpf(lo, self.sample_rate));
+            update_lr_coeffs(&mut self.hpf_low, Biquad::butterworth_hpf(lo, self.sample_rate));
             self.low_cut_hz = lo;
         }
         if (mi - self.mid_cut_hz).abs() > f32::EPSILON {
-            self.h_mid = design_lowpass(mi, self.sample_rate, NUM_TAPS);
+            update_lr_coeffs(&mut self.lpf_mid, Biquad::butterworth_lpf(mi, self.sample_rate));
+            update_lr_coeffs(&mut self.hpf_mid, Biquad::butterworth_hpf(mi, self.sample_rate));
             self.mid_cut_hz = mi;
         }
     }
 }
 
-impl BandSplitter for FirBandSplitter {
+impl BandSplitter for LrBandSplitter {
     #[inline]
     fn split(&mut self, sample: f32) -> (f32, f32, f32) {
-        let n = self.delay.len();
-        self.delay[self.pos] = sample;
-
-        // Convolve: h[k] multiplies x[n-k]. Most recent sample (k=0) is at
-        // delay[pos], so we walk the ring backwards from pos.
-        let mut y_low = 0.0f32;
-        let mut y_mid = 0.0f32;
-        let mut idx = self.pos;
-        for k in 0..n {
-            let x = self.delay[idx];
-            y_low += self.h_low[k] * x;
-            y_mid += self.h_mid[k] * x;
-            idx = if idx == 0 { n - 1 } else { idx - 1 };
-        }
-
-        // Sample aligned with the filters' group delay — needed so the high
-        // band subtraction cancels the passband of the mid lowpass exactly.
-        let center_idx = (self.pos + n - self.center) % n;
-        let x_delayed = self.delay[center_idx];
-
-        self.pos = if self.pos + 1 == n { 0 } else { self.pos + 1 };
-
-        let low = y_low;
-        let mid = y_mid - y_low;
-        let high = x_delayed - y_mid;
+        let low  = self.lpf_low.process(sample);
+        let mid  = self.lpf_mid.process(self.hpf_low.process(sample));
+        let high = self.hpf_mid.process(sample);
         (low, mid, high)
     }
 }
 
-/// Windowed-sinc lowpass design. Blackman window gives ~-74 dB stopband,
-/// which is well below anything audible after per-band gain staging.
-fn design_lowpass(cutoff_hz: f32, sample_rate: f32, num_taps: usize) -> Vec<f32> {
-    use std::f32::consts::PI;
-    let m = (num_taps - 1) as f32;
-    let fc = (cutoff_hz / sample_rate).clamp(1.0e-6, 0.499);
-    let mut h = vec![0.0f32; num_taps];
-    let mut sum = 0.0f32;
-    for n in 0..num_taps {
-        let x = n as f32 - m / 2.0;
-        // Ideal lowpass impulse response: 2*fc * sinc(2*fc*x)
-        let ideal = if x.abs() < 1.0e-9 {
-            2.0 * fc
-        } else {
-            (2.0 * PI * fc * x).sin() / (PI * x)
-        };
-        // Blackman window
-        let w = 0.42 - 0.5 * (2.0 * PI * n as f32 / m).cos()
-                     + 0.08 * (4.0 * PI * n as f32 / m).cos();
-        h[n] = ideal * w;
-        sum += h[n];
+/// Swap in new biquad coefficients without clearing the delay-line state,
+/// so a live cutoff change doesn't produce a discontinuity.
+fn update_lr_coeffs(lr: &mut Lr4, src: Biquad) {
+    for target in [&mut lr.a, &mut lr.b] {
+        target.b0 = src.b0; target.b1 = src.b1; target.b2 = src.b2;
+        target.a1 = src.a1; target.a2 = src.a2;
     }
-    // Normalize DC gain to exactly 1.0 so band sums stay unity.
-    let inv = 1.0 / sum;
-    for v in h.iter_mut() {
-        *v *= inv;
-    }
-    h
 }
 
 /// Guard against nonsensical cutoff configs (crossed, zero, above Nyquist).
@@ -156,19 +190,16 @@ fn sanitize_cuts(low: f32, mid: f32, sample_rate: f32) -> (f32, f32) {
     let mut lo = low.clamp(10.0, nyq - 1.0);
     let mut mi = mid.clamp(10.0, nyq - 1.0);
     if mi <= lo {
-        // Keep a minimum octave gap so the mid band isn't empty.
         mi = (lo * 2.0).min(nyq - 1.0);
-        if mi <= lo {
-            lo = mi * 0.5;
-        }
+        if mi <= lo { lo = mi * 0.5; }
     }
     (lo, mi)
 }
 
 /// 3-band stereo crossover. Owns per-channel splitters plus live gains.
 pub struct Crossover {
-    left: FirBandSplitter,
-    right: FirBandSplitter,
+    left:  LrBandSplitter,
+    right: LrBandSplitter,
     master: f32,
     low_gain: f32,
     mid_gain: f32,
@@ -179,8 +210,8 @@ impl Crossover {
     pub fn new(cfg: &AudioRuntimeConfig) -> Self {
         let sr = OUTPUT_RATE as f32;
         Self {
-            left: FirBandSplitter::new(cfg.low_cut_hz, cfg.mid_cut_hz, sr),
-            right: FirBandSplitter::new(cfg.low_cut_hz, cfg.mid_cut_hz, sr),
+            left:  LrBandSplitter::new(cfg.low_cut_hz, cfg.mid_cut_hz, sr),
+            right: LrBandSplitter::new(cfg.low_cut_hz, cfg.mid_cut_hz, sr),
             master: cfg.volume,
             low_gain: cfg.low_gain,
             mid_gain: cfg.mid_gain,
@@ -188,9 +219,6 @@ impl Crossover {
         }
     }
 
-    /// Hot-update gains and crossover frequencies from a freshly received
-    /// config. Filter coefficients are recomputed in place only when the
-    /// cutoffs actually change.
     pub fn update(&mut self, cfg: &AudioRuntimeConfig) {
         self.master = cfg.volume;
         self.low_gain = cfg.low_gain;
@@ -223,39 +251,76 @@ impl Crossover {
     }
 }
 
+// Keep the trivial splitter around as a fallback / sanity target for bring-up.
+#[allow(dead_code)]
+pub struct PassthroughSplitter;
+impl BandSplitter for PassthroughSplitter {
+    #[inline]
+    fn split(&mut self, s: f32) -> (f32, f32, f32) { (s, s, s) }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Impulse response should sum to the delayed input across all three
-    /// bands (this is the whole point of the complementary FIR structure).
-    #[test]
-    fn bands_sum_to_delayed_input() {
-        let mut s = FirBandSplitter::new(1000.0, 10000.0, 96000.0);
-        let center = (NUM_TAPS - 1) / 2;
-        // Push an impulse followed by zeros; reconstructed signal should be
-        // a single unit sample at index `center`.
-        let mut recon = vec![0.0f32; NUM_TAPS + 16];
-        for n in 0..recon.len() {
-            let x = if n == 0 { 1.0 } else { 0.0 };
-            let (lo, mi, hi) = s.split(x);
-            recon[n] = lo + mi + hi;
-        }
-        for (i, v) in recon.iter().enumerate() {
-            let expect = if i == center { 1.0 } else { 0.0 };
-            assert!((v - expect).abs() < 1.0e-5, "recon[{i}]={v} expected {expect}");
-        }
+    fn prime<S: BandSplitter>(s: &mut S, x: f32, n: usize) {
+        for _ in 0..n { s.split(x); }
     }
 
-    /// DC (a constant) must pass entirely through the low band.
+    /// DC (a constant) must end up entirely in the low band.
     #[test]
     fn dc_lives_in_low_band() {
-        let mut s = FirBandSplitter::new(1000.0, 10000.0, 96000.0);
-        // Prime the delay line so the FIRs reach steady state.
-        for _ in 0..NUM_TAPS * 2 { s.split(1.0); }
+        let mut s = LrBandSplitter::new(500.0, 5000.0, 96000.0);
+        prime(&mut s, 1.0, 4096);
         let (lo, mi, hi) = s.split(1.0);
-        assert!((lo - 1.0).abs() < 1.0e-4, "low={lo}");
-        assert!(mi.abs() < 1.0e-4, "mid={mi}");
-        assert!(hi.abs() < 1.0e-4, "high={hi}");
+        assert!((lo - 1.0).abs() < 1.0e-3, "low={lo}");
+        assert!(mi.abs() < 1.0e-3, "mid={mi}");
+        assert!(hi.abs() < 1.0e-3, "high={hi}");
+    }
+
+    /// Nyquist-ish alternating signal must end up entirely in the high band.
+    #[test]
+    fn hf_lives_in_high_band() {
+        let mut s = LrBandSplitter::new(500.0, 5000.0, 96000.0);
+        // Feed a 24 kHz square-ish signal (alternating sign) for a while.
+        let mut sign = 1.0f32;
+        for _ in 0..4096 { s.split(sign); sign = -sign; }
+        // Now measure: bands' energy over another block.
+        let (mut el, mut em, mut eh) = (0.0f32, 0.0f32, 0.0f32);
+        for _ in 0..4096 {
+            let (lo, mi, hi) = s.split(sign);
+            sign = -sign;
+            el += lo * lo; em += mi * mi; eh += hi * hi;
+        }
+        assert!(eh > 100.0 * (el + em), "energies: low={el} mid={em} high={eh}");
+    }
+
+    /// 3-way LR4 is all-pass in magnitude: summed bands should preserve the
+    /// RMS level of a broadband input to within a small tolerance.
+    #[test]
+    fn bands_sum_is_approximately_allpass() {
+        let mut s = LrBandSplitter::new(500.0, 5000.0, 96000.0);
+        // Deterministic pseudo-noise.
+        let mut state: u32 = 0x1234_5678;
+        let mut rng = || {
+            state ^= state << 13; state ^= state >> 17; state ^= state << 5;
+            (state as i32 as f32) / (i32::MAX as f32)
+        };
+        // Prime past the transient.
+        for _ in 0..4096 { let x = rng(); s.split(x); }
+        let (mut ex, mut ey) = (0.0f64, 0.0f64);
+        for _ in 0..16384 {
+            let x = rng();
+            let (lo, mi, hi) = s.split(x);
+            let y = lo + mi + hi;
+            ex += (x * x) as f64;
+            ey += (y * y) as f64;
+        }
+        let ratio = ey / ex;
+        assert!((ratio - 1.0).abs() < 0.02, "sum/input energy ratio = {ratio}");
     }
 }
