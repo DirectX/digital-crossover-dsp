@@ -19,8 +19,9 @@ use crate::pipe::poll_readable;
 
 pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntimeConfig>, state: SharedState) {
     let host = cpal::default_host();
-    let device = host.default_output_device().expect("No output device");
-    println!("Output device: {}", device.name().unwrap());
+
+    let device = select_device(&host);
+    println!("Output device: {}", device.name().unwrap_or_default());
 
     let config = StreamConfig {
         channels: OUTPUT_CHANNELS as u16,
@@ -210,4 +211,69 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
             }
         }
     }
+}
+
+/// Select the best available 6-channel output device.
+///
+/// Priority order:
+///   1. Exact name match against DEVICE_NAME constant (if non-empty)
+///   2. Any raw `hw:` device supporting OUTPUT_CHANNELS ch at OUTPUT_RATE
+///   3. Any device supporting OUTPUT_CHANNELS ch at OUTPUT_RATE (plugin fallback)
+///   4. Default output device (last resort — may not support 6ch)
+fn select_device(host: &cpal::Host) -> cpal::Device {
+    use cpal::traits::DeviceTrait;
+
+    let devices: Vec<cpal::Device> = host
+        .output_devices()
+        .expect("Cannot enumerate output devices")
+        .collect();
+
+    fn supports_6ch(d: &cpal::Device) -> bool {
+        d.supported_output_configs()
+            .map(|mut cfgs| {
+                cfgs.any(|c| {
+                    c.channels() as usize == OUTPUT_CHANNELS
+                        && c.min_sample_rate().0 <= OUTPUT_RATE
+                        && c.max_sample_rate().0 >= OUTPUT_RATE
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    // 1. Explicit name override
+    if !DEVICE_NAME.is_empty() {
+        if devices.iter().any(|d| d.name().map(|n| n == DEVICE_NAME).unwrap_or(false)) {
+            println!("[device] Using configured device: {}", DEVICE_NAME);
+            return devices.into_iter().find(|d| {
+                d.name().map(|n| n == DEVICE_NAME).unwrap_or(false)
+            }).unwrap();
+        }
+        eprintln!("[device] Warning: DEVICE_NAME '{}' not found, falling back", DEVICE_NAME);
+    }
+
+    // 2. Raw hw: device with 6ch
+    if let Some(d) = devices.iter().find(|d| {
+        d.name()
+            .map(|n| n.starts_with("hw:") && supports_6ch(d))
+            .unwrap_or(false)
+    }) {
+        let name = d.name().unwrap_or_default();
+        println!("[device] Auto-selected raw hw: device: {name}");
+        return devices.into_iter().find(|d| {
+            d.name().map(|n| n == name).unwrap_or(false)
+        }).unwrap();
+    }
+
+    // 3. Any 6ch capable device (plugin, plughw, etc.)
+    if let Some(d) = devices.iter().find(|d| supports_6ch(d)) {
+        let name = d.name().unwrap_or_default();
+        eprintln!("[device] Warning: no raw hw: device found, using plugin device: {name}");
+        return devices.into_iter().find(|d| {
+            d.name().map(|n| n == name).unwrap_or(false)
+        }).unwrap();
+    }
+
+    // 4. Default fallback
+    eprintln!("[device] Warning: no 6-channel device found, using system default");
+    host.default_output_device().expect("No output device available")
 }

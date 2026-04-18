@@ -16,6 +16,11 @@ pub const P_GAIN: f64 = 0.002;
 pub const I_GAIN: f64 = 0.00005;
 pub const POLL_TIMEOUT_MS: i32 = 200;
 
+/// ALSA device name to open for 6-channel output.
+/// Set to a raw hw: name (e.g. "hw:1,0") to bypass all ALSA plugins and
+/// avoid LFE/surround resampling. Empty string = auto-detect first suitable device.
+pub const DEVICE_NAME: &str = "";
+
 fn default_master_volume() -> f32 { 1.0 }
 fn default_band_gain() -> f32 { 1.0 }
 fn default_low_cut() -> f32 { 1000.0 }

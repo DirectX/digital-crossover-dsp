@@ -1,18 +1,20 @@
 use crate::config::AudioRuntimeConfig;
 
-/// Output channel layout (ALSA surround51 convention):
-///   0 = FL  -> low  L
-///   1 = FR  -> low  R
-///   2 = RL  -> mid  L
-///   3 = RR  -> mid  R
-///   4 = FC  -> high L
-///   5 = LFE -> high R
-pub const OUT_FL: usize = 0;
-pub const OUT_FR: usize = 1;
-pub const OUT_RL: usize = 2;
-pub const OUT_RR: usize = 3;
-pub const OUT_FC: usize = 4;
-pub const OUT_LFE: usize = 5;
+/// Output channel layout — ALSA surround51 stereo-compatible pairs.
+/// Each band occupies an L/R pair so stereo imaging is preserved per band.
+///
+///   0 = FL  (Front Left)   -> Mid  L
+///   1 = FR  (Front Right)  -> Mid  R
+///   2 = RL  (Rear  Left)   -> High L
+///   3 = RR  (Rear  Right)  -> High R
+///   4 = FC  (Center)       -> Low  L
+///   5 = LFE (Subwoofer)    -> Low  R
+pub const OUT_MID_L:  usize = 0;  // FL
+pub const OUT_MID_R:  usize = 1;  // FR
+pub const OUT_HIGH_L: usize = 2;  // RL
+pub const OUT_HIGH_R: usize = 3;  // RR
+pub const OUT_LOW_L:  usize = 4;  // FC
+pub const OUT_LOW_R:  usize = 5;  // LFE
 
 /// Per-channel band splitter. Kept as a trait so real FIR/IIR filters
 /// can replace the trivial passthrough without touching the DSP loop.
@@ -65,6 +67,7 @@ impl Crossover {
     }
 
     /// Process a stereo frame and emit a 6-channel frame in surround51 order.
+    /// Band assignment: Mid→FL/FR, High→RL/RR, Low→FC/LFE.
     #[inline]
     pub fn process(&mut self, l: f32, r: f32) -> [f32; 6] {
         let (l_lo, l_mi, l_hi) = self.left.split(l);
@@ -76,12 +79,12 @@ impl Crossover {
         let gh = self.high_gain * m;
 
         let mut out = [0.0f32; 6];
-        out[OUT_FL] = l_lo * gl;
-        out[OUT_FR] = r_lo * gl;
-        out[OUT_RL] = l_mi * gm;
-        out[OUT_RR] = r_mi * gm;
-        out[OUT_FC] = l_hi * gh;
-        out[OUT_LFE] = r_hi * gh;
+        out[OUT_MID_L]  = l_mi * gm;
+        out[OUT_MID_R]  = r_mi * gm;
+        out[OUT_HIGH_L] = l_hi * gh;
+        out[OUT_HIGH_R] = r_hi * gh;
+        out[OUT_LOW_L]  = l_lo * gl;
+        out[OUT_LOW_R]  = r_lo * gl;
         out
     }
 }
