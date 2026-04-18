@@ -1,4 +1,4 @@
-use cpal::StreamConfig;
+use cpal::{SampleFormat, StreamConfig};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::RingBuffer;
 use rubato::{
@@ -23,35 +23,66 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
     let device = select_device(&host);
     println!("Output device: {}", device.name().unwrap_or_default());
 
-    let config = StreamConfig {
+    let sample_format = device
+        .supported_output_configs()
+        .expect("Cannot query device configs")
+        .find(|c| {
+            c.channels() as usize == OUTPUT_CHANNELS
+                && c.min_sample_rate().0 <= OUTPUT_RATE
+                && c.max_sample_rate().0 >= OUTPUT_RATE
+        })
+        .map(|c| c.sample_format())
+        .unwrap_or(SampleFormat::F32);
+    println!("Device sample format: {:?}", sample_format);
+
+    let stream_config = StreamConfig {
         channels: OUTPUT_CHANNELS as u16,
         sample_rate: cpal::SampleRate(OUTPUT_RATE),
         buffer_size: cpal::BufferSize::Default,
     };
+
+    macro_rules! build_stream {
+        ($T:ty, $consumer:expr) => {{
+            let mut consumer = $consumer;
+            device
+                .build_output_stream(
+                    &stream_config,
+                    move |output: &mut [$T], _| {
+                        for sample in output.iter_mut() {
+                            *sample = <$T as cpal::FromSample<f32>>::from_sample_(
+                                consumer.pop().unwrap_or(0.0),
+                            );
+                        }
+                    },
+                    |err| eprintln!("CPAL error: {err}"),
+                    None,
+                )
+                .expect("Failed to build output stream")
+        }};
+    }
 
     while !token.is_cancelled() {
         let initial_cfg = config_rx.borrow_and_update().clone();
         let mut crossover = Crossover::new(&initial_cfg);
         println!("DSP starting with config: {:?}", initial_cfg);
 
-        let (mut producer, mut consumer) = RingBuffer::<i32>::new(BUFFER_CAPACITY);
+        let (mut producer, consumer) = RingBuffer::<f32>::new(BUFFER_CAPACITY);
 
-        let stream = device
-            .build_output_stream(
-                &config,
-                move |output: &mut [i32], _| {
-                    for sample in output.iter_mut() {
-                        *sample = consumer.pop().unwrap_or(0);
-                    }
-                },
-                |err| eprintln!("CPAL error: {err}"),
-                None,
-            )
-            .expect("Failed to build output stream");
+        let stream = match sample_format {
+            SampleFormat::F32 => build_stream!(f32, consumer),
+            SampleFormat::I16 => build_stream!(i16, consumer),
+            SampleFormat::I32 => build_stream!(i32, consumer),
+            SampleFormat::U16 => build_stream!(u16, consumer),
+            SampleFormat::U32 => build_stream!(u32, consumer),
+            _ => {
+                eprintln!("Unsupported sample format {:?}, falling back to F32", sample_format);
+                build_stream!(f32, consumer)
+            }
+        };
 
         stream.play().expect("Failed to start playback");
         println!(
-            "Playback started at {OUTPUT_RATE} Hz, {OUTPUT_CHANNELS}ch. Ctrl+C to exit."
+            "Playback started at {OUTPUT_RATE} Hz, {OUTPUT_CHANNELS}ch, format={sample_format:?}."
         );
 
         loop {
@@ -202,8 +233,7 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
 
                 for &sample in &six {
                     let clamped = sample.clamp(-1.0, 1.0);
-                    let out_i32 = (clamped as f64 * i32::MAX as f64) as i32;
-                    if producer.push(out_i32).is_err() {
+                    if producer.push(clamped).is_err() {
                         eprintln!("[buf] overflow, dropping samples");
                         break 'frame_loop;
                     }
@@ -213,16 +243,6 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
     }
 }
 
-/// Select the best available 6-channel output device.
-///
-/// Priority order:
-///   1. Exact name match against DEVICE_NAME constant (if non-empty)
-///   2. hw: device with 6ch @ OUTPUT_RATE, excluding HDMI/DisplayPort
-///   3. Any non-HDMI device with 6ch @ OUTPUT_RATE (plughw / plugin)
-///   4. Any device with 6ch @ OUTPUT_RATE (including HDMI, last resort)
-///   5. System default (with warning)
-///
-/// All enumerated devices and their max channel count are printed at startup.
 fn select_device(host: &cpal::Host) -> cpal::Device {
     use cpal::traits::DeviceTrait;
 
@@ -231,7 +251,6 @@ fn select_device(host: &cpal::Host) -> cpal::Device {
         .expect("Cannot enumerate output devices")
         .collect();
 
-    // Returns the highest channel count this device advertises at any rate.
     fn max_channels(d: &cpal::Device) -> u16 {
         d.supported_output_configs()
             .map(|cfgs| cfgs.map(|c| c.channels()).max().unwrap_or(0))
@@ -256,7 +275,6 @@ fn select_device(host: &cpal::Host) -> cpal::Device {
             || n.contains("nvidia") || n.contains("intel")
     }
 
-    // Print all found devices for diagnostics.
     println!("[device] Available output devices:");
     for d in &devices {
         let name = d.name().unwrap_or_else(|_| "<unknown>".into());
@@ -265,7 +283,6 @@ fn select_device(host: &cpal::Host) -> cpal::Device {
         println!("[device]   {ok}  max={ch}ch  {name}");
     }
 
-    // 1. Explicit name override.
     if !DEVICE_NAME.is_empty() {
         if devices.iter().any(|d| d.name().map(|n| n == DEVICE_NAME).unwrap_or(false)) {
             println!("[device] Using configured DEVICE_NAME: {}", DEVICE_NAME);
@@ -276,16 +293,17 @@ fn select_device(host: &cpal::Host) -> cpal::Device {
         eprintln!("[device] Warning: DEVICE_NAME '{}' not found, falling back", DEVICE_NAME);
     }
 
-    // Helper: take ownership of matching device by name string.
     let take = |devices: Vec<cpal::Device>, name: &str| -> cpal::Device {
         devices.into_iter()
             .find(|d| d.name().map(|n| n == name).unwrap_or(false))
             .unwrap()
     };
 
-    // 2. Raw hw: device, non-HDMI, 6ch capable.
+    // Prefer non-hw: devices (pipewire, pulse, default) — they go through a plug
+    // layer that handles real hardware constraints (e.g. USB bandwidth limiting
+    // channel count at high sample rates) without exposing them to us.
     if let Some(d) = devices.iter().find(|d| {
-        d.name().map(|n| n.starts_with("hw:") && !is_hdmi(&n) && supports_6ch_at_rate(d))
+        d.name().map(|n| !n.starts_with("hw:") && !is_hdmi(&n) && supports_6ch_at_rate(d))
             .unwrap_or(false)
     }) {
         let name = d.name().unwrap_or_default();
@@ -293,24 +311,23 @@ fn select_device(host: &cpal::Host) -> cpal::Device {
         return take(devices, &name);
     }
 
-    // 3. Any non-HDMI device with 6ch (plugin / plughw).
+    // Fall back to direct hw: devices (may fail if hardware has combined
+    // rate×channel constraints not captured by supported_output_configs).
     if let Some(d) = devices.iter().find(|d| {
-        d.name().map(|n| !is_hdmi(&n) && supports_6ch_at_rate(d))
+        d.name().map(|n| n.starts_with("hw:") && !is_hdmi(&n) && supports_6ch_at_rate(d))
             .unwrap_or(false)
     }) {
         let name = d.name().unwrap_or_default();
-        eprintln!("[device] Warning: no raw hw: device found, using: {name}");
+        eprintln!("[device] Warning: using direct hw: device {name} — format negotiation may fail");
         return take(devices, &name);
     }
 
-    // 4. Any 6ch capable device, including HDMI (last resort before panic).
     if let Some(d) = devices.iter().find(|d| supports_6ch_at_rate(d)) {
         let name = d.name().unwrap_or_default();
         eprintln!("[device] Warning: only HDMI/DP 6ch device found, using: {name}");
         return take(devices, &name);
     }
 
-    // 5. System default — likely wrong channel count, will error on stream open.
-    eprintln!("[device] Warning: no 6-channel device found — set DEVICE_NAME in config.rs");
+    eprintln!("[device] Warning: no 6-channel device found - set DEVICE_NAME in config.rs");
     host.default_output_device().expect("No output device available")
 }
