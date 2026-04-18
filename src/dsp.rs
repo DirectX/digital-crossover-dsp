@@ -217,9 +217,12 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
 ///
 /// Priority order:
 ///   1. Exact name match against DEVICE_NAME constant (if non-empty)
-///   2. Any raw `hw:` device supporting OUTPUT_CHANNELS ch at OUTPUT_RATE
-///   3. Any device supporting OUTPUT_CHANNELS ch at OUTPUT_RATE (plugin fallback)
-///   4. Default output device (last resort — may not support 6ch)
+///   2. hw: device with 6ch @ OUTPUT_RATE, excluding HDMI/DisplayPort
+///   3. Any non-HDMI device with 6ch @ OUTPUT_RATE (plughw / plugin)
+///   4. Any device with 6ch @ OUTPUT_RATE (including HDMI, last resort)
+///   5. System default (with warning)
+///
+/// All enumerated devices and their max channel count are printed at startup.
 fn select_device(host: &cpal::Host) -> cpal::Device {
     use cpal::traits::DeviceTrait;
 
@@ -228,7 +231,14 @@ fn select_device(host: &cpal::Host) -> cpal::Device {
         .expect("Cannot enumerate output devices")
         .collect();
 
-    fn supports_6ch(d: &cpal::Device) -> bool {
+    // Returns the highest channel count this device advertises at any rate.
+    fn max_channels(d: &cpal::Device) -> u16 {
+        d.supported_output_configs()
+            .map(|cfgs| cfgs.map(|c| c.channels()).max().unwrap_or(0))
+            .unwrap_or(0)
+    }
+
+    fn supports_6ch_at_rate(d: &cpal::Device) -> bool {
         d.supported_output_configs()
             .map(|mut cfgs| {
                 cfgs.any(|c| {
@@ -240,40 +250,66 @@ fn select_device(host: &cpal::Host) -> cpal::Device {
             .unwrap_or(false)
     }
 
-    // 1. Explicit name override
+    fn is_hdmi(name: &str) -> bool {
+        let n = name.to_ascii_lowercase();
+        n.contains("hdmi") || n.contains("displayport") || n.contains("dp,")
+    }
+
+    // Print all found devices for diagnostics.
+    println!("[device] Available output devices:");
+    for d in &devices {
+        let name = d.name().unwrap_or_else(|_| "<unknown>".into());
+        let ch = max_channels(&d);
+        let ok = if supports_6ch_at_rate(&d) { "6ch@96k OK" } else { "       ---" };
+        println!("[device]   {ok}  max={ch}ch  {name}");
+    }
+
+    // 1. Explicit name override.
     if !DEVICE_NAME.is_empty() {
         if devices.iter().any(|d| d.name().map(|n| n == DEVICE_NAME).unwrap_or(false)) {
-            println!("[device] Using configured device: {}", DEVICE_NAME);
-            return devices.into_iter().find(|d| {
-                d.name().map(|n| n == DEVICE_NAME).unwrap_or(false)
-            }).unwrap();
+            println!("[device] Using configured DEVICE_NAME: {}", DEVICE_NAME);
+            return devices.into_iter()
+                .find(|d| d.name().map(|n| n == DEVICE_NAME).unwrap_or(false))
+                .unwrap();
         }
         eprintln!("[device] Warning: DEVICE_NAME '{}' not found, falling back", DEVICE_NAME);
     }
 
-    // 2. Raw hw: device with 6ch
+    // Helper: take ownership of matching device by name string.
+    let take = |devices: Vec<cpal::Device>, name: &str| -> cpal::Device {
+        devices.into_iter()
+            .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+            .unwrap()
+    };
+
+    // 2. Raw hw: device, non-HDMI, 6ch capable.
     if let Some(d) = devices.iter().find(|d| {
-        d.name()
-            .map(|n| n.starts_with("hw:") && supports_6ch(d))
+        d.name().map(|n| n.starts_with("hw:") && !is_hdmi(&n) && supports_6ch_at_rate(d))
             .unwrap_or(false)
     }) {
         let name = d.name().unwrap_or_default();
-        println!("[device] Auto-selected raw hw: device: {name}");
-        return devices.into_iter().find(|d| {
-            d.name().map(|n| n == name).unwrap_or(false)
-        }).unwrap();
+        println!("[device] Auto-selected: {name}");
+        return take(devices, &name);
     }
 
-    // 3. Any 6ch capable device (plugin, plughw, etc.)
-    if let Some(d) = devices.iter().find(|d| supports_6ch(d)) {
+    // 3. Any non-HDMI device with 6ch (plugin / plughw).
+    if let Some(d) = devices.iter().find(|d| {
+        d.name().map(|n| !is_hdmi(&n) && supports_6ch_at_rate(d))
+            .unwrap_or(false)
+    }) {
         let name = d.name().unwrap_or_default();
-        eprintln!("[device] Warning: no raw hw: device found, using plugin device: {name}");
-        return devices.into_iter().find(|d| {
-            d.name().map(|n| n == name).unwrap_or(false)
-        }).unwrap();
+        eprintln!("[device] Warning: no raw hw: device found, using: {name}");
+        return take(devices, &name);
     }
 
-    // 4. Default fallback
-    eprintln!("[device] Warning: no 6-channel device found, using system default");
+    // 4. Any 6ch capable device, including HDMI (last resort before panic).
+    if let Some(d) = devices.iter().find(|d| supports_6ch_at_rate(d)) {
+        let name = d.name().unwrap_or_default();
+        eprintln!("[device] Warning: only HDMI/DP 6ch device found, using: {name}");
+        return take(devices, &name);
+    }
+
+    // 5. System default — likely wrong channel count, will error on stream open.
+    eprintln!("[device] Warning: no 6-channel device found — set DEVICE_NAME in config.rs");
     host.default_output_device().expect("No output device available")
 }
