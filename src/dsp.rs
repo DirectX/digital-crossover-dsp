@@ -14,6 +14,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::*;
+use crate::crossover::Crossover;
 use crate::pipe::poll_readable;
 
 pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntimeConfig>, state: SharedState) {
@@ -22,16 +23,15 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
     println!("Output device: {}", device.name().unwrap());
 
     let config = StreamConfig {
-        channels: CHANNELS as u16,
+        channels: OUTPUT_CHANNELS as u16,
         sample_rate: cpal::SampleRate(OUTPUT_RATE),
         buffer_size: cpal::BufferSize::Default,
     };
 
     while !token.is_cancelled() {
-        if config_rx.has_changed().unwrap_or(false) {
-            let latest_config = config_rx.borrow_and_update().clone();
-            println!("DSP applying new config: {:?}", latest_config);
-        }
+        let initial_cfg = config_rx.borrow_and_update().clone();
+        let mut crossover = Crossover::new(&initial_cfg);
+        println!("DSP starting with config: {:?}", initial_cfg);
 
         let (mut producer, mut consumer) = RingBuffer::<i32>::new(BUFFER_CAPACITY);
 
@@ -49,7 +49,9 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
             .expect("Failed to build output stream");
 
         stream.play().expect("Failed to start playback");
-        println!("Playback started at {OUTPUT_RATE} Hz. Ctrl+C to exit.");
+        println!(
+            "Playback started at {OUTPUT_RATE} Hz, {OUTPUT_CHANNELS}ch. Ctrl+C to exit."
+        );
 
         loop {
             if token.is_cancelled() {
@@ -99,6 +101,13 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
             if token.is_cancelled() {
                 break;
             }
+
+            if config_rx.has_changed().unwrap_or(false) {
+                let latest = config_rx.borrow_and_update().clone();
+                println!("DSP applying new config: {:?}", latest);
+                crossover.update(&latest);
+            }
+
             if !poll_readable(file.as_raw_fd(), POLL_TIMEOUT_MS) {
                 continue;
             }
@@ -185,9 +194,15 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
 
             let out_frames = output[0].len();
             'frame_loop: for frame in 0..out_frames {
-                for ch in 0..CHANNELS {
-                    let sample = (output[ch][frame] * i32::MAX as f64) as i32;
-                    if producer.push(sample).is_err() {
+                let l = output[0][frame] as f32;
+                let r = if CHANNELS > 1 { output[1][frame] as f32 } else { l };
+
+                let six = crossover.process(l, r);
+
+                for &sample in &six {
+                    let clamped = sample.clamp(-1.0, 1.0);
+                    let out_i32 = (clamped as f64 * i32::MAX as f64) as i32;
+                    if producer.push(out_i32).is_err() {
                         eprintln!("[buf] overflow, dropping samples");
                         break 'frame_loop;
                     }

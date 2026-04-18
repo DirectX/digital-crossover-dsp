@@ -200,3 +200,20 @@ Fill > 50% --> ratio decreases slightly --> fewer output samples --> buffer drai
 Fill < 50% --> ratio increases slightly --> more output samples --> buffer fills
 Clamped within the resampler's allowed range (1/1.01 to 1.01, i.e. +/-1%)
 ADJUST_GAIN (0.0005) controls responsiveness -- increase for faster convergence, decrease for smoother output
+
+#### Crossover
+
+src/config.rs: Added OUTPUT_CHANNELS = 6, scaled BUFFER_CAPACITY accordingly, and rebuilt AudioRuntimeConfig with volume, per-band gains (low_gain/mid_gain/high_gain), and placeholder crossover frequencies (low_cut_hz/mid_cut_hz). All fields have serde defaults and a Default impl so partial JSON payloads work.
+src/crossover.rs (new): Modular 3-band stereo crossover framework.
+BandSplitter trait — pluggable per-channel band split (future FIR/IIR).
+PassthroughSplitter — current trivial implementation: feeds full signal to all three bands.
+Crossover — owns L/R splitters plus live gains, with update(&cfg) for hot-reload and process(l, r) -> [f32; 6] returning a frame in ALSA surround51 order: FL/FR = low, RL/RR = mid, FC/LFE = high.
+src/dsp.rs: Output stream now opens 6 channels at 96 kHz. Inside the main loop, config_rx.has_changed() triggers crossover.update(...) so volumes apply immediately. After resampling, each stereo output frame is fed through Crossover::process and the 6 resulting samples are pushed to the ring buffer.
+src/main.rs: Registered crossover module; initial runtime config now uses AudioRuntimeConfig::default().
+You can already drive it via the existing POST /update_config endpoint, e.g.:
+
+```shell
+curl -X POST http://127.0.0.1:3000/update_config \
+  -H 'Content-Type: application/json' \
+  -d '{"volume":0.8,"low_gain":1.0,"mid_gain":0.5,"high_gain":0.25,"low_cut_hz":1000,"mid_cut_hz":10000}'
+```

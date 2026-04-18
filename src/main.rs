@@ -1,4 +1,5 @@
 mod config;
+mod crossover;
 mod dsp;
 mod metadata;
 mod pipe;
@@ -38,10 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let token = CancellationToken::new();
             let state = Arc::new(Mutex::new(AppState::default()));
 
-            let initial_config = AudioRuntimeConfig {
-                filter_cutoff: 0.95,
-                volume: 1.0,
-            };
+            let initial_config = AudioRuntimeConfig::default();
             let (config_tx, config_rx) = watch::channel(initial_config);
 
             metadata::spawn_thread(token.clone(), state.clone());
