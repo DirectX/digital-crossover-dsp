@@ -217,3 +217,19 @@ curl -X POST http://127.0.0.1:3000/update_config \
   -H 'Content-Type: application/json' \
   -d '{"volume":0.8,"low_gain":1.0,"mid_gain":0.5,"high_gain":0.25,"low_cut_hz":1000,"mid_cut_hz":10000}'
 ```
+
+#### TUI Update
+
+src/server.rs: Added GET /config which returns the current AudioRuntimeConfig (read via watch::Sender::borrow()), so the TUI (or any client) can pull up-to-date initial values instead of guessing defaults. POST /update_config and GET /status unchanged.
+src/tui.rs: Added a full interactive gain panel:
+On startup fetches /config to initialize local state.
+New "Gains" block shows four gauges (Master / Low / Mid / High) colored distinctly; the selected row is highlighted bold and prefixed with >. Labels show Nx linear plus ± dB.
+Footer shows current crossover cutoffs (read-only for now) or last network error.
+Keybindings:
+Tab / ↓: next control, Shift+Tab / ↑: previous
+1/2/3/4 or m: jump to Master/Low/Mid/High
+← / -: decrement, → / + / =: increment (step 0.05, with Shift for fine 0.01)
+0: reset selected to 1.0, r: reset all to defaults
+q / Esc: quit
+Every adjustment POSTs the full config to /update_config; errors are shown inline.
+Gains are clamped to [0.0, 2.0].

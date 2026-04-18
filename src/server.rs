@@ -18,6 +18,16 @@ pub async fn spawn(token: CancellationToken, config_tx: watch::Sender<AudioRunti
             }),
         )
         .route(
+            "/config",
+            get({
+                let tx = config_tx.clone();
+                move || async move {
+                    let cfg = tx.borrow().clone();
+                    Json(cfg)
+                }
+            }),
+        )
+        .route(
             "/status",
             get({
                 let state = state.clone();
