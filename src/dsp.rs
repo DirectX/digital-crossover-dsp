@@ -110,7 +110,8 @@ pub fn run(
         let mut fft_buf: Vec<f32> = Vec::with_capacity(FFT_SIZE);
 
         // Reusable scratch buffer for rustfft.
-        let mut fft_scratch: Vec<Complex<f32>> = vec![Complex::default(); fft_plan.get_outofplace_scratch_len().max(1)];
+        let mut fft_scratch: Vec<Complex<f32>> =
+            vec![Complex::default(); fft_plan.get_outofplace_scratch_len().max(1)];
         let mut fft_out: Vec<Complex<f32>> = vec![Complex::default(); FFT_SIZE];
 
         let (mut producer, consumer) = RingBuffer::<f32>::new(buffer_capacity);
@@ -277,68 +278,68 @@ pub fn run(
                 }
             };
 
-            let out_frames = output[0].len();
-            'frame_loop: for frame in 0..out_frames {
-                let l = output[0][frame] as f32;
-                let r = if CHANNELS > 1 {
-                    output[1][frame] as f32
-                } else {
-                    l
-                };
+            // let out_frames = output[0].len();
+            // 'frame_loop: for frame in 0..out_frames {
+            //     let l = output[0][frame] as f32;
+            //     let r = if CHANNELS > 1 {
+            //         output[1][frame] as f32
+            //     } else {
+            //         l
+            //     };
 
-                let six = crossover.process(l, r);
+            //     let six = crossover.process(l, r);
 
-                // Accumulate mono mix for FFT
-                let mono = (l + r) * 0.5;
-                fft_buf.push(mono);
-                if fft_buf.len() == FFT_SIZE {
-                    // Apply Hann window and convert to complex
-                    let mut fft_in: Vec<Complex<f32>> = fft_buf
-                        .iter()
-                        .zip(hann.iter())
-                        .map(|(&s, &w)| Complex { re: s * w, im: 0.0 })
-                        .collect();
+            //     // Accumulate mono mix for FFT
+            //     let mono = (l + r) * 0.5;
+            //     fft_buf.push(mono);
+            //     if fft_buf.len() == FFT_SIZE {
+            //         // Apply Hann window and convert to complex
+            //         let mut fft_in: Vec<Complex<f32>> = fft_buf
+            //             .iter()
+            //             .zip(hann.iter())
+            //             .map(|(&s, &w)| Complex { re: s * w, im: 0.0 })
+            //             .collect();
 
-                    fft_plan.process_outofplace_with_scratch(
-                        &mut fft_in,
-                        &mut fft_out,
-                        &mut fft_scratch,
-                    );
+            //         fft_plan.process_outofplace_with_scratch(
+            //             &mut fft_in,
+            //             &mut fft_out,
+            //             &mut fft_scratch,
+            //         );
 
-                    // Build magnitude array (positive frequencies only, dB)
-                    let bins = FFT_SIZE / 2;
-                    let scale = 2.0 / FFT_SIZE as f32;
-                    let magnitudes: Vec<f32> = fft_out[..bins]
-                        .iter()
-                        .map(|c| {
-                            let mag = c.norm() * scale;
-                            20.0 * mag.max(1e-9).log10()
-                        })
-                        .collect();
+            //         // Build magnitude array (positive frequencies only, dB)
+            //         let bins = FFT_SIZE / 2;
+            //         let scale = 2.0 / FFT_SIZE as f32;
+            //         let magnitudes: Vec<f32> = fft_out[..bins]
+            //             .iter()
+            //             .map(|c| {
+            //                 let mag = c.norm() * scale;
+            //                 20.0 * mag.max(1e-9).log10()
+            //             })
+            //             .collect();
 
-                    let json = serde_json::json!({
-                        "type": "fft",
-                        "bins": magnitudes,
-                        "sample_rate": output_rate,
-                        "fft_size": FFT_SIZE,
-                    })
-                    .to_string();
+            //         let json = serde_json::json!({
+            //             "type": "fft",
+            //             "bins": magnitudes,
+            //             "sample_rate": output_rate,
+            //             "fft_size": FFT_SIZE,
+            //         })
+            //         .to_string();
 
-                    let _ = fft_tx.send(json);
+            //         let _ = fft_tx.send(json);
 
-                    // 50% overlap: keep the second half for the next window
-                    let half = FFT_SIZE / 2;
-                    fft_buf.drain(..half);
-                }
+            //         // 50% overlap: keep the second half for the next window
+            //         let half = FFT_SIZE / 2;
+            //         fft_buf.drain(..half);
+            //     }
 
-                for &sample in &six {
-                    let clamped = sample.clamp(-1.0, 1.0);
-                    if producer.push(clamped).is_err() {
-                        eprintln!("[buf] overflow, dropping samples");
-                        break 'frame_loop;
-                    }
-                }
-            }
+            //     for &sample in &six {
+            //         let clamped = sample.clamp(-1.0, 1.0);
+            //         if producer.push(clamped).is_err() {
+            //             eprintln!("[buf] overflow, dropping samples");
+            //             break 'frame_loop;
+            //         }
+            //     }
+            // }
         }
     }
 }
@@ -416,7 +417,9 @@ fn select_device(host: &cpal::Host) -> Option<(cpal::Device, u32)> {
                         .map(|d| (d, rate));
                 }
             }
-            eprintln!("[device] Warning: DEVICE_NAME '{DEVICE_NAME}' does not support 6ch, falling back");
+            eprintln!(
+                "[device] Warning: DEVICE_NAME '{DEVICE_NAME}' does not support 6ch, falling back"
+            );
         } else {
             eprintln!("[device] Warning: DEVICE_NAME '{DEVICE_NAME}' not found, falling back");
         }
@@ -431,9 +434,7 @@ fn select_device(host: &cpal::Host) -> Option<(cpal::Device, u32)> {
         if let Some(d) = devices.iter().find(|d| {
             d.name()
                 .map(|n| {
-                    !n.starts_with("hw:")
-                        && !is_hdmi_or_dp(&n)
-                        && supports_6ch_at_rate(d, rate)
+                    !n.starts_with("hw:") && !is_hdmi_or_dp(&n) && supports_6ch_at_rate(d, rate)
                 })
                 .unwrap_or(false)
         }) {
@@ -460,7 +461,9 @@ fn select_device(host: &cpal::Host) -> Option<(cpal::Device, u32)> {
                 .unwrap_or(false)
         }) {
             let name = d.name().unwrap_or_default();
-            eprintln!("[device] Warning: using direct hw: device {name} @ {rate}Hz — format negotiation may fail");
+            eprintln!(
+                "[device] Warning: using direct hw: device {name} @ {rate}Hz — format negotiation may fail"
+            );
             return devices
                 .into_iter()
                 .find(|d| d.name().map(|n| n == name).unwrap_or(false))
@@ -471,9 +474,10 @@ fn select_device(host: &cpal::Host) -> Option<(cpal::Device, u32)> {
     // Priority 3: honest hardware that happens to be HDMI/DP (e.g. AV receiver
     // connected via HDMI — a valid 5.1 sink).
     for &rate in PREFERRED_RATES {
-        if let Some(d) = devices.iter().find(|d| {
-            is_honest_hardware(d) && supports_6ch_at_rate(d, rate)
-        }) {
+        if let Some(d) = devices
+            .iter()
+            .find(|d| is_honest_hardware(d) && supports_6ch_at_rate(d, rate))
+        {
             let name = d.name().unwrap_or_default();
             eprintln!("[device] Warning: only honest HDMI/DP 6ch device found: {name} @ {rate}Hz");
             return devices
