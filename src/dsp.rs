@@ -4,6 +4,8 @@ use rtrb::RingBuffer;
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
+use rustfft::{FftPlanner, num_complex::Complex};
+use std::f32::consts::PI;
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
@@ -21,6 +23,7 @@ pub fn run(
     token: CancellationToken,
     mut config_rx: watch::Receiver<AudioRuntimeConfig>,
     state: SharedState,
+    fft_tx: FftBroadcast,
 ) {
     let host = cpal::default_host();
 
@@ -93,6 +96,22 @@ pub fn run(
         let initial_cfg = config_rx.borrow_and_update().clone();
         let mut crossover = Crossover::new(&initial_cfg, output_rate as f32);
         println!("DSP starting with config: {:?}", initial_cfg);
+
+        // FFT plan (reused across frames; FFT_SIZE constant so plan is stable).
+        let mut fft_planner = FftPlanner::<f32>::new();
+        let fft_plan = fft_planner.plan_fft_forward(FFT_SIZE);
+
+        // Pre-compute Hann window coefficients.
+        let hann: Vec<f32> = (0..FFT_SIZE)
+            .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / FFT_SIZE as f32).cos()))
+            .collect();
+
+        // Mono sample accumulator for FFT (50% overlap).
+        let mut fft_buf: Vec<f32> = Vec::with_capacity(FFT_SIZE);
+
+        // Reusable scratch buffer for rustfft.
+        let mut fft_scratch: Vec<Complex<f32>> = vec![Complex::default(); fft_plan.get_outofplace_scratch_len().max(1)];
+        let mut fft_out: Vec<Complex<f32>> = vec![Complex::default(); FFT_SIZE];
 
         let (mut producer, consumer) = RingBuffer::<f32>::new(buffer_capacity);
 
@@ -268,6 +287,49 @@ pub fn run(
                 };
 
                 let six = crossover.process(l, r);
+
+                // Accumulate mono mix for FFT
+                let mono = (l + r) * 0.5;
+                fft_buf.push(mono);
+                if fft_buf.len() == FFT_SIZE {
+                    // Apply Hann window and convert to complex
+                    let mut fft_in: Vec<Complex<f32>> = fft_buf
+                        .iter()
+                        .zip(hann.iter())
+                        .map(|(&s, &w)| Complex { re: s * w, im: 0.0 })
+                        .collect();
+
+                    fft_plan.process_outofplace_with_scratch(
+                        &mut fft_in,
+                        &mut fft_out,
+                        &mut fft_scratch,
+                    );
+
+                    // Build magnitude array (positive frequencies only, dB)
+                    let bins = FFT_SIZE / 2;
+                    let scale = 2.0 / FFT_SIZE as f32;
+                    let magnitudes: Vec<f32> = fft_out[..bins]
+                        .iter()
+                        .map(|c| {
+                            let mag = c.norm() * scale;
+                            20.0 * mag.max(1e-9).log10()
+                        })
+                        .collect();
+
+                    let json = serde_json::json!({
+                        "type": "fft",
+                        "bins": magnitudes,
+                        "sample_rate": output_rate,
+                        "fft_size": FFT_SIZE,
+                    })
+                    .to_string();
+
+                    let _ = fft_tx.send(json);
+
+                    // 50% overlap: keep the second half for the next window
+                    let half = FFT_SIZE / 2;
+                    fft_buf.drain(..half);
+                }
 
                 for &sample in &six {
                     let clamped = sample.clamp(-1.0, 1.0);

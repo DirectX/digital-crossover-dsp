@@ -13,6 +13,13 @@ pub const P_GAIN: f64 = 0.002;
 pub const I_GAIN: f64 = 0.00005;
 pub const POLL_TIMEOUT_MS: i32 = 200;
 
+/// Number of samples per FFT window. Positive-frequency bins = FFT_SIZE / 2.
+pub const FFT_SIZE: usize = 2048;
+
+/// Pre-serialised JSON payload broadcast to WebSocket clients each FFT frame.
+/// Using a `String` avoids re-serialising per-client.
+pub type FftBroadcast = tokio::sync::broadcast::Sender<String>;
+
 /// ALSA device name to open for 6-channel output.
 /// Set to a raw hw: name (e.g. "hw:1,0") to bypass all ALSA plugins and
 /// avoid LFE/surround resampling. Empty string = auto-detect first suitable device.
