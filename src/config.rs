@@ -41,12 +41,28 @@ pub struct AudioRuntimeConfig {
     pub mid_gain: f32,
     #[serde(default = "default_band_gain")]
     pub high_gain: f32,
-    /// Low/mid crossover frequency in Hz (reserved for future real filtering).
     #[serde(default = "default_low_cut")]
     pub low_cut_hz: f32,
-    /// Mid/high crossover frequency in Hz (reserved for future real filtering).
     #[serde(default = "default_mid_cut")]
     pub mid_cut_hz: f32,
+    #[serde(default)]
+    pub low_mute: bool,
+    #[serde(default)]
+    pub mid_mute: bool,
+    #[serde(default)]
+    pub high_mute: bool,
+    #[serde(default)]
+    pub low_solo: bool,
+    #[serde(default)]
+    pub mid_solo: bool,
+    #[serde(default)]
+    pub high_solo: bool,
+    #[serde(default)]
+    pub low_bypass: bool,
+    #[serde(default)]
+    pub mid_bypass: bool,
+    #[serde(default)]
+    pub high_bypass: bool,
 }
 
 impl Default for AudioRuntimeConfig {
@@ -58,11 +74,20 @@ impl Default for AudioRuntimeConfig {
             high_gain: default_band_gain(),
             low_cut_hz: default_low_cut(),
             mid_cut_hz: default_mid_cut(),
+            low_mute: false,
+            mid_mute: false,
+            high_mute: false,
+            low_solo: false,
+            mid_solo: false,
+            high_solo: false,
+            low_bypass: false,
+            mid_bypass: false,
+            high_bypass: false,
         }
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct AppState {
     pub track: String,
     pub artist: String,
@@ -76,6 +101,25 @@ pub struct AppState {
     pub chunks_processed: u64,
     pub output_rate: u32,
     pub output_format: String,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            track: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            playback: "Unknown".to_string(),
+            buffer_fill: 0.0,
+            buffer_fill_avg: 0.0,
+            buffer_fill_min: 0.0,
+            buffer_fill_max: 0.0,
+            resample_ratio: 0.0,
+            chunks_processed: 0,
+            output_rate: 0,
+            output_format: String::new(),
+        }
+    }
 }
 
 pub type SharedState = Arc<Mutex<AppState>>;

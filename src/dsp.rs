@@ -239,6 +239,9 @@ pub fn run(
                     s.buffer_fill_max = fill_max * 100.0;
                     s.resample_ratio = effective_ratio;
                     s.chunks_processed = chunks_processed;
+                    if s.playback == "Unknown" {
+                        s.playback = "Playing".to_string();
+                    }
                 }
                 fill_sum = 0.0;
                 fill_min = 1.0;

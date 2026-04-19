@@ -43,6 +43,24 @@ struct RuntimeConfig {
     low_cut_hz: f32,
     #[serde(default = "default_mid_cut")]
     mid_cut_hz: f32,
+    #[serde(default)]
+    low_mute: bool,
+    #[serde(default)]
+    mid_mute: bool,
+    #[serde(default)]
+    high_mute: bool,
+    #[serde(default)]
+    low_solo: bool,
+    #[serde(default)]
+    mid_solo: bool,
+    #[serde(default)]
+    high_solo: bool,
+    #[serde(default)]
+    low_bypass: bool,
+    #[serde(default)]
+    mid_bypass: bool,
+    #[serde(default)]
+    high_bypass: bool,
 }
 
 fn one() -> f32 { 1.0 }
@@ -58,6 +76,15 @@ impl Default for RuntimeConfig {
             high_gain: 1.0,
             low_cut_hz: 1000.0,
             mid_cut_hz: 10000.0,
+            low_mute: false,
+            mid_mute: false,
+            high_mute: false,
+            low_solo: false,
+            mid_solo: false,
+            high_solo: false,
+            low_bypass: false,
+            mid_bypass: false,
+            high_bypass: false,
         }
     }
 }
@@ -184,12 +211,48 @@ pub async fn run(base_url: &str) -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Char('q') | KeyCode::Esc => break Ok::<(), Box<dyn std::error::Error>>(()),
                     KeyCode::Tab | KeyCode::Down => selected = selected.next(),
                     KeyCode::BackTab | KeyCode::Up => selected = selected.prev(),
-                    KeyCode::Char('m') | KeyCode::Char('1') => selected = Selected::Master,
+                    KeyCode::Char('1') => selected = Selected::Master,
                     KeyCode::Char('2') => selected = Selected::Low,
                     KeyCode::Char('3') => selected = Selected::Mid,
                     KeyCode::Char('4') => selected = Selected::High,
                     KeyCode::Char('5') => selected = Selected::LowCut,
                     KeyCode::Char('6') => selected = Selected::MidCut,
+                    KeyCode::Char('m') => {
+                        match selected {
+                            Selected::Low  => { cfg.low_mute  = !cfg.low_mute;  changed = true; }
+                            Selected::Mid  => { cfg.mid_mute  = !cfg.mid_mute;  changed = true; }
+                            Selected::High => { cfg.high_mute = !cfg.high_mute; changed = true; }
+                            _ => {}
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        match selected {
+                            Selected::Low  => {
+                                let new = !cfg.low_solo;
+                                cfg.low_solo = new; cfg.mid_solo = false; cfg.high_solo = false;
+                                changed = true;
+                            }
+                            Selected::Mid  => {
+                                let new = !cfg.mid_solo;
+                                cfg.low_solo = false; cfg.mid_solo = new; cfg.high_solo = false;
+                                changed = true;
+                            }
+                            Selected::High => {
+                                let new = !cfg.high_solo;
+                                cfg.low_solo = false; cfg.mid_solo = false; cfg.high_solo = new;
+                                changed = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                    KeyCode::Char('b') => {
+                        match selected {
+                            Selected::Low  => { cfg.low_bypass  = !cfg.low_bypass;  changed = true; }
+                            Selected::Mid  => { cfg.mid_bypass  = !cfg.mid_bypass;  changed = true; }
+                            Selected::High => { cfg.high_bypass = !cfg.high_bypass; changed = true; }
+                            _ => {}
+                        }
+                    }
                     KeyCode::Left | KeyCode::Char('-') => {
                         if selected.is_freq() {
                             let lo = if selected == Selected::LowCut {
@@ -366,7 +429,7 @@ fn draw_ui(
             Style::default().fg(Color::Red),
         )),
         None => Line::from(Span::styled(
-            " Gains: 0.00–2.00x  |  Cutoffs: 20–20000 Hz (Shift+←→ for 5 Hz steps)",
+            " 1-4: gains  5-6: cutoffs  m: mute  s: solo  b: bypass  Tab/↑↓: sel  ←→: adjust  Shift: fine  0: reset  r: all",
             Style::default().fg(Color::DarkGray),
         )),
     };
@@ -390,32 +453,68 @@ fn draw_gains(f: &mut Frame, area: Rect, cfg: &RuntimeConfig, selected: Selected
         .split(inner);
 
     let entries = [
-        (Selected::Master, cfg.volume,   Color::Cyan),
-        (Selected::Low,    cfg.low_gain, Color::Green),
-        (Selected::Mid,    cfg.mid_gain, Color::Yellow),
-        (Selected::High,   cfg.high_gain, Color::Magenta),
+        (Selected::Master, cfg.volume,    Color::Cyan,    false, false, false),
+        (Selected::Low,    cfg.low_gain,  Color::Green,   cfg.low_mute,  cfg.low_solo,  cfg.low_bypass),
+        (Selected::Mid,    cfg.mid_gain,  Color::Yellow,  cfg.mid_mute,  cfg.mid_solo,  cfg.mid_bypass),
+        (Selected::High,   cfg.high_gain, Color::Magenta, cfg.high_mute, cfg.high_solo, cfg.high_bypass),
     ];
 
-    for (i, (sel, value, color)) in entries.iter().enumerate() {
+    for (i, (sel, value, color, mute, solo, bypass)) in entries.iter().enumerate() {
         let is_sel = *sel == selected;
         let marker = if is_sel { ">" } else { " " };
         let ratio = (*value / GAIN_MAX).clamp(0.0, 1.0) as f64;
-        let style = if is_sel {
+        let gauge_style = if is_sel {
             Style::default().fg(*color).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(*color)
         };
-        let gauge = Gauge::default()
-            .gauge_style(style)
-            .ratio(ratio)
-            .label(format!(
-                "{} {:<6} {:.2}x ({:+.1} dB)",
-                marker,
-                sel.label(),
-                value,
-                20.0 * value.max(1e-6).log10()
-            ));
-        f.render_widget(gauge, rows[i]);
+
+        let has_flags = matches!(sel, Selected::Low | Selected::Mid | Selected::High);
+
+        if has_flags {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(0), Constraint::Length(14)])
+                .split(rows[i]);
+
+            let gauge = Gauge::default()
+                .gauge_style(gauge_style)
+                .ratio(ratio)
+                .label(format!(
+                    "{} {:<6} {:.2}x ({:+.1} dB)",
+                    marker, sel.label(), value,
+                    20.0 * value.max(1e-6).log10()
+                ));
+            f.render_widget(gauge, cols[0]);
+
+            let mu_style = if *mute   { Style::default().fg(Color::Red)    } else { Style::default().fg(Color::DarkGray) };
+            let so_style = if *solo   { Style::default().fg(Color::Yellow) } else { Style::default().fg(Color::DarkGray) };
+            let by_style = if *bypass { Style::default().fg(Color::Cyan)   } else { Style::default().fg(Color::DarkGray) };
+            let badges = Paragraph::new(Line::from(vec![
+                Span::styled(" [", Style::default().fg(Color::DarkGray)),
+                Span::styled("M", mu_style),
+                Span::styled("][", Style::default().fg(Color::DarkGray)),
+                Span::styled("S", so_style),
+                Span::styled("][", Style::default().fg(Color::DarkGray)),
+                Span::styled("B", by_style),
+                Span::styled("]", Style::default().fg(Color::DarkGray)),
+            ]));
+            f.render_widget(badges, cols[1]);
+        } else {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(0), Constraint::Length(14)])
+                .split(rows[i]);
+            let gauge = Gauge::default()
+                .gauge_style(gauge_style)
+                .ratio(ratio)
+                .label(format!(
+                    "{} {:<6} {:.2}x ({:+.1} dB)",
+                    marker, sel.label(), value,
+                    20.0 * value.max(1e-6).log10()
+                ));
+            f.render_widget(gauge, cols[0]);
+        }
     }
 }
 

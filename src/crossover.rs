@@ -210,6 +210,15 @@ pub struct Crossover {
     low_gain: f32,
     mid_gain: f32,
     high_gain: f32,
+    low_mute: bool,
+    mid_mute: bool,
+    high_mute: bool,
+    low_solo: bool,
+    mid_solo: bool,
+    high_solo: bool,
+    low_bypass: bool,
+    mid_bypass: bool,
+    high_bypass: bool,
 }
 
 impl Crossover {
@@ -222,6 +231,15 @@ impl Crossover {
             low_gain: cfg.low_gain,
             mid_gain: cfg.mid_gain,
             high_gain: cfg.high_gain,
+            low_mute: cfg.low_mute,
+            mid_mute: cfg.mid_mute,
+            high_mute: cfg.high_mute,
+            low_solo: cfg.low_solo,
+            mid_solo: cfg.mid_solo,
+            high_solo: cfg.high_solo,
+            low_bypass: cfg.low_bypass,
+            mid_bypass: cfg.mid_bypass,
+            high_bypass: cfg.high_bypass,
         }
     }
 
@@ -230,29 +248,52 @@ impl Crossover {
         self.low_gain = cfg.low_gain;
         self.mid_gain = cfg.mid_gain;
         self.high_gain = cfg.high_gain;
+        self.low_mute = cfg.low_mute;
+        self.mid_mute = cfg.mid_mute;
+        self.high_mute = cfg.high_mute;
+        self.low_solo = cfg.low_solo;
+        self.mid_solo = cfg.mid_solo;
+        self.high_solo = cfg.high_solo;
+        self.low_bypass = cfg.low_bypass;
+        self.mid_bypass = cfg.mid_bypass;
+        self.high_bypass = cfg.high_bypass;
         self.left.set_cutoffs(cfg.low_cut_hz, cfg.mid_cut_hz);
         self.right.set_cutoffs(cfg.low_cut_hz, cfg.mid_cut_hz);
     }
 
     /// Process a stereo frame and emit a 6-channel frame in surround51 order.
     /// Band assignment: Mid→FL/FR, High→RL/RR, Low→FC/LFE.
+    ///
+    /// Solo: if any band is soloed, only soloed bands produce output.
+    /// Mute: silence the band regardless of solo state.
+    /// Bypass: substitute the raw (pre-filter) input for the filtered signal.
     #[inline]
     pub fn process(&mut self, l: f32, r: f32) -> [f32; 6] {
         let (l_lo, l_mi, l_hi) = self.left.split(l);
         let (r_lo, r_mi, r_hi) = self.right.split(r);
 
+        let any_solo = self.low_solo || self.mid_solo || self.high_solo;
         let m = self.master;
-        let gl = self.low_gain * m;
-        let gm = self.mid_gain * m;
-        let gh = self.high_gain * m;
+
+        let active_lo = (!any_solo || self.low_solo) && !self.low_mute;
+        let active_mi = (!any_solo || self.mid_solo) && !self.mid_mute;
+        let active_hi = (!any_solo || self.high_solo) && !self.high_mute;
+
+        let (sl, sr_) = if self.low_bypass  { (l, r) } else { (l_lo, r_lo) };
+        let (ml, mr_) = if self.mid_bypass  { (l, r) } else { (l_mi, r_mi) };
+        let (hl, hr_) = if self.high_bypass { (l, r) } else { (l_hi, r_hi) };
+
+        let gl = if active_lo { self.low_gain  * m } else { 0.0 };
+        let gm = if active_mi { self.mid_gain  * m } else { 0.0 };
+        let gh = if active_hi { self.high_gain * m } else { 0.0 };
 
         let mut out = [0.0f32; 6];
-        out[OUT_MID_L]  = l_mi * gm;
-        out[OUT_MID_R]  = r_mi * gm;
-        out[OUT_HIGH_L] = l_hi * gh;
-        out[OUT_HIGH_R] = r_hi * gh;
-        out[OUT_LOW_L]  = l_lo * gl;
-        out[OUT_LOW_R]  = r_lo * gl;
+        out[OUT_MID_L]  = ml  * gm;
+        out[OUT_MID_R]  = mr_ * gm;
+        out[OUT_HIGH_L] = hl  * gh;
+        out[OUT_HIGH_R] = hr_ * gh;
+        out[OUT_LOW_L]  = sl  * gl;
+        out[OUT_LOW_R]  = sr_ * gl;
         out
     }
 }
