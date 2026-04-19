@@ -1,9 +1,11 @@
 use std::io;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use crossterm::execute;
+use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -12,6 +14,7 @@ use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use ratatui::Frame;
 use ratatui::Terminal;
 use serde::{Deserialize, Serialize};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMessage};
 
 #[derive(Default, Deserialize)]
 struct Status {
@@ -186,6 +189,38 @@ pub async fn run(base_url: &str) -> Result<(), Box<dyn std::error::Error>> {
         Err(_) => RuntimeConfig::default(),
     };
 
+    // Shared FFT bins updated by background WS task
+    let fft_bins: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+    let fft_bins_task = fft_bins.clone();
+    let ws_url = base_url
+        .replacen("https://", "wss://", 1)
+        .replacen("http://", "ws://", 1)
+        + "/ws/fft";
+    tokio::spawn(async move {
+        loop {
+            match connect_async(&ws_url).await {
+                Ok((ws_stream, _)) => {
+                    let (_, mut read) = ws_stream.split();
+                    while let Some(Ok(msg)) = read.next().await {
+                        if let WsMessage::Text(text) = msg {
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                                if let Some(arr) = val["bins"].as_array() {
+                                    let bins: Vec<f32> = arr
+                                        .iter()
+                                        .filter_map(|v| v.as_f64().map(|f| f as f32))
+                                        .collect();
+                                    *fft_bins_task.lock().unwrap() = bins;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+
     let mut selected = Selected::Master;
     let mut last_error: Option<String> = None;
 
@@ -195,7 +230,8 @@ pub async fn run(base_url: &str) -> Result<(), Box<dyn std::error::Error>> {
             Err(_) => Status::default(),
         };
 
-        terminal.draw(|f| draw_ui(f, &status, &cfg, selected, last_error.as_deref()))?;
+        let bins_snapshot = fft_bins.lock().unwrap().clone();
+        terminal.draw(|f| draw_ui(f, &status, &cfg, selected, last_error.as_deref(), &bins_snapshot))?;
 
         if event::poll(Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
@@ -320,6 +356,7 @@ fn draw_ui(
     cfg: &RuntimeConfig,
     selected: Selected,
     last_error: Option<&str>,
+    fft_bins: &[f32],
 ) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -330,7 +367,8 @@ fn draw_ui(
             Constraint::Length(8),  // dsp stats
             Constraint::Length(6),  // gain controls
             Constraint::Length(4),  // crossover
-            Constraint::Min(1),     // footer/errors
+            Constraint::Min(8),     // spectrum
+            Constraint::Length(3),  // footer/errors
         ])
         .split(f.area());
 
@@ -422,6 +460,7 @@ fn draw_ui(
 
     draw_gains(f, chunks[3], cfg, selected);
     draw_crossover(f, chunks[4], cfg, selected);
+    draw_spectrum(f, chunks[5], fft_bins, status.output_rate, cfg.low_cut_hz, cfg.mid_cut_hz);
 
     let footer_text = match last_error {
         Some(err) => Line::from(Span::styled(
@@ -434,7 +473,7 @@ fn draw_ui(
         )),
     };
     let footer = Paragraph::new(footer_text).block(Block::default().borders(Borders::ALL));
-    f.render_widget(footer, chunks[5]);
+    f.render_widget(footer, chunks[6]);
 }
 
 fn draw_gains(f: &mut Frame, area: Rect, cfg: &RuntimeConfig, selected: Selected) {
@@ -556,4 +595,119 @@ fn draw_crossover(f: &mut Frame, area: Rect, cfg: &RuntimeConfig, selected: Sele
             ));
         f.render_widget(gauge, rows[i]);
     }
+}
+
+fn draw_spectrum(
+    f: &mut Frame,
+    area: Rect,
+    bins: &[f32],
+    sample_rate: u32,
+    low_cut_hz: f32,
+    mid_cut_hz: f32,
+) {
+    let title = if sample_rate > 0 {
+        format!(" Spectrum  (20 Hz – {} kHz) ", sample_rate / 2 / 1000)
+    } else {
+        " Spectrum ".to_string()
+    };
+    let outer = Block::default().title(title).borders(Borders::ALL);
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+
+    if bins.is_empty() || inner.width == 0 || inner.height == 0 {
+        f.render_widget(
+            Paragraph::new("Waiting for audio...")
+                .style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+
+    let cols = inner.width as usize;
+    let rows = inner.height as usize;
+    let n_bins = bins.len();
+
+    const DB_MIN: f32 = -80.0;
+    const DB_MAX: f32 = 0.0;
+
+    // Compute which display column the crossover frequencies fall on.
+    // bin_for_freq = freq * n_bins * 2 / sample_rate  (linear bin index)
+    // col_for_bin  = log(bin) / log(n_bins) * cols   (log-index mapping)
+    let freq_to_col = |hz: f32| -> usize {
+        if sample_rate == 0 || hz <= 0.0 {
+            return 0;
+        }
+        let bin = (hz * (n_bins * 2) as f32 / sample_rate as f32).clamp(1.0, n_bins as f32);
+        let t = bin.log(n_bins as f32);
+        (t * cols as f32) as usize
+    };
+
+    let low_col = freq_to_col(low_cut_hz);
+    let mid_col = freq_to_col(mid_cut_hz);
+
+    // Map each display column to an FFT bin range using log-index scale
+    let col_db: Vec<f32> = (0..cols)
+        .map(|col| {
+            let t0 = col as f64 / cols as f64;
+            let t1 = (col + 1) as f64 / cols as f64;
+            let b0 = (n_bins as f64).powf(t0) as usize;
+            let b1 = ((n_bins as f64).powf(t1) as usize).min(n_bins);
+            let b0 = b0.min(b1.saturating_sub(1));
+            let b1 = b1.max(b0 + 1).min(n_bins);
+            bins[b0..b1]
+                .iter()
+                .cloned()
+                .fold(f32::NEG_INFINITY, f32::max)
+        })
+        .collect();
+
+    // Precompute per-column band colour (matches gain bar colours)
+    let col_color: Vec<Color> = (0..cols)
+        .map(|col| {
+            if col < low_col {
+                Color::Green   // Low band
+            } else if col < mid_col {
+                Color::Yellow  // Mid band
+            } else {
+                Color::Magenta // High band
+            }
+        })
+        .collect();
+
+    // Sub-cell vertical resolution using Unicode block elements
+    const BLOCK: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+    let lines: Vec<Line> = (0..rows)
+        .map(|row| {
+            let cell_from_bottom = rows - 1 - row;
+            let spans: Vec<Span> = col_db
+                .iter()
+                .enumerate()
+                .map(|(col, &db)| {
+                    let norm =
+                        ((db - DB_MIN) / (DB_MAX - DB_MIN)).clamp(0.0, 1.0);
+                    let bar_f = norm * rows as f32;
+                    let bar_cells = bar_f as usize;
+                    let frac = bar_f.fract();
+
+                    let (ch, lit) = if cell_from_bottom < bar_cells {
+                        ('█', true)
+                    } else if cell_from_bottom == bar_cells && frac > 0.0 {
+                        (BLOCK[((frac * 8.0) as usize).min(7)], true)
+                    } else {
+                        (' ', false)
+                    };
+
+                    if lit {
+                        Span::styled(ch.to_string(), Style::default().fg(col_color[col]))
+                    } else {
+                        Span::raw(" ")
+                    }
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines), inner);
 }

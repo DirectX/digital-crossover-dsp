@@ -520,6 +520,7 @@ dependencies = [
  "clap",
  "cpal",
  "crossterm",
+ "futures-util",
  "libc",
  "ratatui",
  "reqwest",
@@ -529,6 +530,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tokio-util",
 ]
 
