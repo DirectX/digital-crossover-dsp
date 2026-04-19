@@ -62,6 +62,8 @@ impl Default for RuntimeConfig {
 
 const GAIN_MAX: f32 = 2.0;
 const GAIN_MIN: f32 = 0.0;
+const FREQ_MIN: f32 = 20.0;
+const FREQ_MAX: f32 = 20000.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Selected {
@@ -69,43 +71,73 @@ enum Selected {
     Low,
     Mid,
     High,
+    LowCut,
+    MidCut,
 }
 
 impl Selected {
     fn next(self) -> Self {
         match self {
             Selected::Master => Selected::Low,
-            Selected::Low => Selected::Mid,
-            Selected::Mid => Selected::High,
-            Selected::High => Selected::Master,
+            Selected::Low   => Selected::Mid,
+            Selected::Mid   => Selected::High,
+            Selected::High  => Selected::LowCut,
+            Selected::LowCut => Selected::MidCut,
+            Selected::MidCut => Selected::Master,
         }
     }
     fn prev(self) -> Self {
         match self {
-            Selected::Master => Selected::High,
-            Selected::Low => Selected::Master,
-            Selected::Mid => Selected::Low,
-            Selected::High => Selected::Mid,
+            Selected::Master => Selected::MidCut,
+            Selected::Low    => Selected::Master,
+            Selected::Mid    => Selected::Low,
+            Selected::High   => Selected::Mid,
+            Selected::LowCut => Selected::High,
+            Selected::MidCut => Selected::LowCut,
         }
     }
     fn label(self) -> &'static str {
         match self {
             Selected::Master => "Master",
-            Selected::Low => "Low",
-            Selected::Mid => "Mid",
-            Selected::High => "High",
+            Selected::Low    => "Low",
+            Selected::Mid    => "Mid",
+            Selected::High   => "High",
+            Selected::LowCut => "Low cut",
+            Selected::MidCut => "Mid cut",
         }
+    }
+    fn is_freq(self) -> bool {
+        matches!(self, Selected::LowCut | Selected::MidCut)
     }
 }
 
 fn gain_ref<'a>(cfg: &'a mut RuntimeConfig, sel: Selected) -> &'a mut f32 {
     match sel {
         Selected::Master => &mut cfg.volume,
-        Selected::Low => &mut cfg.low_gain,
-        Selected::Mid => &mut cfg.mid_gain,
-        Selected::High => &mut cfg.high_gain,
+        Selected::Low    => &mut cfg.low_gain,
+        Selected::Mid    => &mut cfg.mid_gain,
+        Selected::High   => &mut cfg.high_gain,
+        _ => unreachable!(),
     }
 }
+
+fn freq_ref<'a>(cfg: &'a mut RuntimeConfig, sel: Selected) -> &'a mut f32 {
+    match sel {
+        Selected::LowCut => &mut cfg.low_cut_hz,
+        Selected::MidCut => &mut cfg.mid_cut_hz,
+        _ => unreachable!(),
+    }
+}
+
+fn default_freq(sel: Selected) -> f32 {
+    match sel {
+        Selected::LowCut => 1000.0,
+        Selected::MidCut => 10000.0,
+        _ => unreachable!(),
+    }
+}
+
+
 
 pub async fn run(base_url: &str) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
@@ -142,30 +174,56 @@ pub async fn run(base_url: &str) -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 let fine = key.modifiers.contains(KeyModifiers::SHIFT);
-                let step: f32 = if fine { 0.01 } else { 0.05 };
+                let gain_step: f32 = if fine { 0.01 } else { 0.05 };
+                let freq_step: f32 = if fine { 5.0 } else { 50.0 };
                 let mut changed = false;
 
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break Ok::<(), Box<dyn std::error::Error>>(()),
                     KeyCode::Tab | KeyCode::Down => selected = selected.next(),
                     KeyCode::BackTab | KeyCode::Up => selected = selected.prev(),
-                    KeyCode::Char('m') => selected = Selected::Master,
-                    KeyCode::Char('1') => selected = Selected::Master,
+                    KeyCode::Char('m') | KeyCode::Char('1') => selected = Selected::Master,
                     KeyCode::Char('2') => selected = Selected::Low,
                     KeyCode::Char('3') => selected = Selected::Mid,
                     KeyCode::Char('4') => selected = Selected::High,
+                    KeyCode::Char('5') => selected = Selected::LowCut,
+                    KeyCode::Char('6') => selected = Selected::MidCut,
                     KeyCode::Left | KeyCode::Char('-') => {
-                        let v = gain_ref(&mut cfg, selected);
-                        *v = (*v - step).clamp(GAIN_MIN, GAIN_MAX);
+                        if selected.is_freq() {
+                            let lo = if selected == Selected::LowCut {
+                                FREQ_MIN
+                            } else {
+                                cfg.low_cut_hz + 100.0
+                            };
+                            let v = freq_ref(&mut cfg, selected);
+                            *v = (*v - freq_step).max(lo);
+                        } else {
+                            let v = gain_ref(&mut cfg, selected);
+                            *v = (*v - gain_step).clamp(GAIN_MIN, GAIN_MAX);
+                        }
                         changed = true;
                     }
                     KeyCode::Right | KeyCode::Char('+') | KeyCode::Char('=') => {
-                        let v = gain_ref(&mut cfg, selected);
-                        *v = (*v + step).clamp(GAIN_MIN, GAIN_MAX);
+                        if selected.is_freq() {
+                            let hi = if selected == Selected::MidCut {
+                                FREQ_MAX
+                            } else {
+                                cfg.mid_cut_hz - 100.0
+                            };
+                            let v = freq_ref(&mut cfg, selected);
+                            *v = (*v + freq_step).min(hi.max(FREQ_MIN));
+                        } else {
+                            let v = gain_ref(&mut cfg, selected);
+                            *v = (*v + gain_step).clamp(GAIN_MIN, GAIN_MAX);
+                        }
                         changed = true;
                     }
                     KeyCode::Char('0') => {
-                        *gain_ref(&mut cfg, selected) = 1.0;
+                        if selected.is_freq() {
+                            *freq_ref(&mut cfg, selected) = default_freq(selected);
+                        } else {
+                            *gain_ref(&mut cfg, selected) = 1.0;
+                        }
                         changed = true;
                     }
                     KeyCode::Char('r') => {
@@ -205,8 +263,9 @@ fn draw_ui(
             Constraint::Length(3),  // title
             Constraint::Length(6),  // now playing
             Constraint::Length(8),  // dsp stats
-            Constraint::Length(8),  // gain controls
-            Constraint::Min(1),     // help/errors
+            Constraint::Length(6),  // gain controls
+            Constraint::Length(4),  // crossover
+            Constraint::Min(1),     // footer/errors
         ])
         .split(f.area());
 
@@ -216,8 +275,10 @@ fn draw_ui(
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled("Tab/↑↓: select  ←→: adjust  Shift: fine  0: reset  r: reset all  q: quit",
-            Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            "1-4: gains  5-6: cutoffs  Tab/↑↓: select  ←→: adjust  Shift: fine  0: reset  r: all  q: quit",
+            Style::default().fg(Color::DarkGray),
+        ),
     ]))
     .block(Block::default().borders(Borders::ALL));
     f.render_widget(title, chunks[0]);
@@ -284,22 +345,20 @@ fn draw_ui(
     f.render_widget(stats, dsp_chunks[1]);
 
     draw_gains(f, chunks[3], cfg, selected);
+    draw_crossover(f, chunks[4], cfg, selected);
 
-    let help_text = match last_error {
+    let footer_text = match last_error {
         Some(err) => Line::from(Span::styled(
             format!(" {} ", err),
             Style::default().fg(Color::Red),
         )),
         None => Line::from(Span::styled(
-            format!(
-                " Crossover: low<{:.0}Hz  mid<{:.0}Hz  (cutoffs editable via API)",
-                cfg.low_cut_hz, cfg.mid_cut_hz
-            ),
+            " Gains: 0.00–2.00x  |  Cutoffs: 20–20000 Hz (Shift+←→ for 5 Hz steps)",
             Style::default().fg(Color::DarkGray),
         )),
     };
-    let footer = Paragraph::new(help_text).block(Block::default().borders(Borders::ALL));
-    f.render_widget(footer, chunks[4]);
+    let footer = Paragraph::new(footer_text).block(Block::default().borders(Borders::ALL));
+    f.render_widget(footer, chunks[5]);
 }
 
 fn draw_gains(f: &mut Frame, area: Rect, cfg: &RuntimeConfig, selected: Selected) {
@@ -318,10 +377,10 @@ fn draw_gains(f: &mut Frame, area: Rect, cfg: &RuntimeConfig, selected: Selected
         .split(inner);
 
     let entries = [
-        (Selected::Master, cfg.volume, Color::Cyan),
-        (Selected::Low, cfg.low_gain, Color::Green),
-        (Selected::Mid, cfg.mid_gain, Color::Yellow),
-        (Selected::High, cfg.high_gain, Color::Magenta),
+        (Selected::Master, cfg.volume,   Color::Cyan),
+        (Selected::Low,    cfg.low_gain, Color::Green),
+        (Selected::Mid,    cfg.mid_gain, Color::Yellow),
+        (Selected::High,   cfg.high_gain, Color::Magenta),
     ];
 
     for (i, (sel, value, color)) in entries.iter().enumerate() {
@@ -342,6 +401,46 @@ fn draw_gains(f: &mut Frame, area: Rect, cfg: &RuntimeConfig, selected: Selected
                 sel.label(),
                 value,
                 20.0 * value.max(1e-6).log10()
+            ));
+        f.render_widget(gauge, rows[i]);
+    }
+}
+
+fn draw_crossover(f: &mut Frame, area: Rect, cfg: &RuntimeConfig, selected: Selected) {
+    let outer = Block::default().title(" Crossover Frequencies ").borders(Borders::ALL);
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .split(inner);
+
+    let entries = [
+        (Selected::LowCut, cfg.low_cut_hz,  Color::Green),
+        (Selected::MidCut, cfg.mid_cut_hz,  Color::Yellow),
+    ];
+
+    for (i, (sel, value, color)) in entries.iter().enumerate() {
+        let is_sel = *sel == selected;
+        let marker = if is_sel { ">" } else { " " };
+        let log_lo = FREQ_MIN.log10() as f64;
+        let log_hi = FREQ_MAX.log10() as f64;
+        let log_val = (*value as f64).log10().clamp(log_lo, log_hi);
+        let ratio = ((log_val - log_lo) / (log_hi - log_lo)).clamp(0.0, 1.0);
+        let style = if is_sel {
+            Style::default().fg(*color).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(*color)
+        };
+        let gauge = Gauge::default()
+            .gauge_style(style)
+            .ratio(ratio)
+            .label(format!(
+                "{} {:<8} {:.0} Hz",
+                marker,
+                sel.label(),
+                value,
             ));
         f.render_widget(gauge, rows[i]);
     }
