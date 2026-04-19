@@ -23,7 +23,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Run,
+    Serve,
     Tui {
         #[arg(short, long, default_value = "http://127.0.0.1:3000")]
         url: String,
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run => {
+        Commands::Serve => {
             let token = CancellationToken::new();
             let state = Arc::new(Mutex::new(AppState::default()));
 
