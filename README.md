@@ -245,3 +245,51 @@ Tab / ↓: next control, Shift+Tab / ↑: previous
 q / Esc: quit
 Every adjustment POSTs the full config to /update_config; errors are shown inline.
 Gains are clamped to [0.0, 2.0].
+
+#### Device selection logic
+
+```
+let config = device
+    .supported_output_configs()
+    .expect("Cannot query device configs")
+    .filter(|c| c.channels() as usize == OUTPUT_CHANNELS)
+    .max_by_key(|c| c.max_sample_rate().0) // выбрать макс. поддерживаемую частоту
+    .expect("No 6-channel config found");
+
+let rate = OUTPUT_RATE
+    .min(config.max_sample_rate().0)
+    .max(config.min_sample_rate().0);
+
+let stream_config = StreamConfig {
+    channels: OUTPUT_CHANNELS as u16,
+    sample_rate: cpal::SampleRate(rate),
+    buffer_size: cpal::BufferSize::Default,
+};
+```
+
+Review findings & fixes applied
+src/config.rs
+
+Removed OUTPUT_RATE — now determined at runtime by device probing
+Removed BASE_RATIO — computed locally in run() from the actual selected rate
+Removed BUFFER_CAPACITY — same; sized to output_rate * OUTPUT_CHANNELS * 2 at runtime
+src/crossover.rs
+
+Crossover::new now takes an explicit sample_rate: f32 parameter instead of pulling OUTPUT_RATE from the const. If you end up on a 96kHz device, filter coefficients are designed at the correct rate. The update() path was unaffected since LrBandSplitter::set_cutoffs reuses the stored sample rate.
+src/dsp.rs — select_device
+
+Old behaviour	New behaviour
+Returns cpal::Device (panics if none)	Returns Option<(cpal::Device, u32)> — None prints a clear error
+Falls back to host.default_output_device() (almost always stereo)	Hard error with actionable message; set DEVICE_NAME in config.rs
+Probes only OUTPUT_RATE (48kHz)	Probes [96000, 48000] in order — picks 96kHz if the hardware supports it
+is_hdmi() matched "nvidia" and "intel" substrings — false-positives on many real devices	is_hdmi_or_dp() only matches "hdmi", "displayport", "dp,"
+No virtual device filter — a 32-channel PipeWire router could be selected	is_honest_hardware(): excludes any device whose max_channels > 8; real 5.1 hw reports ≤ 8
+take() closure searched the vec twice	Single `find(...).map(
+Device list printed one fixed status string	Prints max_ch, honest, hdmi, and supported rates per device for easier debugging
+HDMI/DP used as last-resort fallback only	Added as Priority 3 — an AV receiver over HDMI is a valid 5.1 sink
+src/dsp.rs — run()
+
+select_device result handled with early-return None path
+buffer_capacity and base_ratio derived from the runtime-selected output_rate
+StreamConfig and all log messages use output_rate instead of the old constant
+Crossover::new(&cfg, output_rate as f32) passes the actual device rate to filter design

@@ -1,4 +1,4 @@
-use crate::config::{AudioRuntimeConfig, OUTPUT_RATE};
+use crate::config::AudioRuntimeConfig;
 
 /// Output channel layout.
 ///
@@ -213,8 +213,8 @@ pub struct Crossover {
 }
 
 impl Crossover {
-    pub fn new(cfg: &AudioRuntimeConfig) -> Self {
-        let sr = OUTPUT_RATE as f32;
+    pub fn new(cfg: &AudioRuntimeConfig, sample_rate: f32) -> Self {
+        let sr = sample_rate;
         Self {
             left:  LrBandSplitter::new(cfg.low_cut_hz, cfg.mid_cut_hz, sr),
             right: LrBandSplitter::new(cfg.low_cut_hz, cfg.mid_cut_hz, sr),

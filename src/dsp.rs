@@ -1,5 +1,5 @@
-use cpal::{SampleFormat, StreamConfig};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{SampleFormat, StreamConfig};
 use rtrb::RingBuffer;
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
@@ -17,19 +17,38 @@ use crate::config::*;
 use crate::crossover::Crossover;
 use crate::pipe::poll_readable;
 
-pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntimeConfig>, state: SharedState) {
+pub fn run(
+    token: CancellationToken,
+    mut config_rx: watch::Receiver<AudioRuntimeConfig>,
+    state: SharedState,
+) {
     let host = cpal::default_host();
 
-    let device = select_device(&host);
+    let (device, output_rate) = match select_device(&host) {
+        Some(d) => d,
+        None => {
+            eprintln!("[device] Error: no suitable 6-channel output device found.");
+            eprintln!("[device] Set DEVICE_NAME in config.rs to specify a device manually.");
+            return;
+        }
+    };
     println!("Output device: {}", device.name().unwrap_or_default());
 
     let sample_format = device
         .supported_output_configs()
         .expect("Cannot query device configs")
-        .find(|c| {
+        .filter(|c| {
             c.channels() as usize == OUTPUT_CHANNELS
-                && c.min_sample_rate().0 <= OUTPUT_RATE
-                && c.max_sample_rate().0 >= OUTPUT_RATE
+                && c.min_sample_rate().0 <= output_rate
+                && c.max_sample_rate().0 >= output_rate
+        })
+        .max_by_key(|c| match c.sample_format() {
+            SampleFormat::F32 => 5,
+            SampleFormat::I32 => 4,
+            SampleFormat::U32 => 3,
+            SampleFormat::I16 => 2,
+            SampleFormat::U16 => 1,
+            _ => 0,
         })
         .map(|c| c.sample_format())
         .unwrap_or(SampleFormat::F32);
@@ -37,9 +56,12 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
 
     let stream_config = StreamConfig {
         channels: OUTPUT_CHANNELS as u16,
-        sample_rate: cpal::SampleRate(OUTPUT_RATE),
+        sample_rate: cpal::SampleRate(output_rate),
         buffer_size: cpal::BufferSize::Default,
     };
+
+    let buffer_capacity: usize = output_rate as usize * OUTPUT_CHANNELS * 2;
+    let base_ratio: f64 = output_rate as f64 / INPUT_RATE as f64;
 
     macro_rules! build_stream {
         ($T:ty, $consumer:expr) => {{
@@ -63,10 +85,10 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
 
     while !token.is_cancelled() {
         let initial_cfg = config_rx.borrow_and_update().clone();
-        let mut crossover = Crossover::new(&initial_cfg);
+        let mut crossover = Crossover::new(&initial_cfg, output_rate as f32);
         println!("DSP starting with config: {:?}", initial_cfg);
 
-        let (mut producer, consumer) = RingBuffer::<f32>::new(BUFFER_CAPACITY);
+        let (mut producer, consumer) = RingBuffer::<f32>::new(buffer_capacity);
 
         let stream = match sample_format {
             SampleFormat::F32 => build_stream!(f32, consumer),
@@ -75,14 +97,17 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
             SampleFormat::U16 => build_stream!(u16, consumer),
             SampleFormat::U32 => build_stream!(u32, consumer),
             _ => {
-                eprintln!("Unsupported sample format {:?}, falling back to F32", sample_format);
+                eprintln!(
+                    "Unsupported sample format {:?}, falling back to F32",
+                    sample_format
+                );
                 build_stream!(f32, consumer)
             }
         };
 
         stream.play().expect("Failed to start playback");
         println!(
-            "Playback started at {OUTPUT_RATE} Hz, {OUTPUT_CHANNELS}ch, format={sample_format:?}."
+            "Playback started at {output_rate} Hz, {OUTPUT_CHANNELS}ch, format={sample_format:?}."
         );
 
         loop {
@@ -113,7 +138,7 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
         };
 
         let mut resampler =
-            SincFixedIn::<f64>::new(BASE_RATIO, 1.05, sinc_params, RESAMPLE_CHUNK, CHANNELS)
+            SincFixedIn::<f64>::new(base_ratio, 1.05, sinc_params, RESAMPLE_CHUNK, CHANNELS)
                 .expect("Failed to create resampler");
 
         let mut input_buf = vec![vec![0.0f64; RESAMPLE_CHUNK]; CHANNELS];
@@ -178,7 +203,7 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
             }
             leftover = 0;
 
-            let fill = (BUFFER_CAPACITY - producer.slots()) as f64 / BUFFER_CAPACITY as f64;
+            let fill = (buffer_capacity - producer.slots()) as f64 / buffer_capacity as f64;
             let error = FILL_TARGET - fill;
 
             integral_error = (integral_error + error).clamp(-50.0, 50.0);
@@ -199,7 +224,7 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
 
             if last_status.elapsed().as_secs() >= 1 {
                 let fill_avg = fill_sum / chunks_processed as f64;
-                let effective_ratio = BASE_RATIO * rel_ratio;
+                let effective_ratio = base_ratio * rel_ratio;
                 {
                     let mut s = state.lock().unwrap();
                     s.buffer_fill = fill * 100.0;
@@ -227,7 +252,11 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
             let out_frames = output[0].len();
             'frame_loop: for frame in 0..out_frames {
                 let l = output[0][frame] as f32;
-                let r = if CHANNELS > 1 { output[1][frame] as f32 } else { l };
+                let r = if CHANNELS > 1 {
+                    output[1][frame] as f32
+                } else {
+                    l
+                };
 
                 let six = crossover.process(l, r);
 
@@ -243,8 +272,10 @@ pub fn run(token: CancellationToken, mut config_rx: watch::Receiver<AudioRuntime
     }
 }
 
-fn select_device(host: &cpal::Host) -> cpal::Device {
+fn select_device(host: &cpal::Host) -> Option<(cpal::Device, u32)> {
     use cpal::traits::DeviceTrait;
+
+    const PREFERRED_RATES: &[u32] = &[96000, 48000];
 
     let devices: Vec<cpal::Device> = host
         .output_devices()
@@ -257,77 +288,132 @@ fn select_device(host: &cpal::Host) -> cpal::Device {
             .unwrap_or(0)
     }
 
-    fn supports_6ch_at_rate(d: &cpal::Device) -> bool {
+    fn supports_6ch_at_rate(d: &cpal::Device, rate: u32) -> bool {
         d.supported_output_configs()
             .map(|mut cfgs| {
                 cfgs.any(|c| {
                     c.channels() as usize == OUTPUT_CHANNELS
-                        && c.min_sample_rate().0 <= OUTPUT_RATE
-                        && c.max_sample_rate().0 >= OUTPUT_RATE
+                        && c.min_sample_rate().0 <= rate
+                        && c.max_sample_rate().0 >= rate
                 })
             })
             .unwrap_or(false)
     }
 
-    fn is_hdmi(name: &str) -> bool {
+    // Devices advertising more than 8 channels are virtual software routers
+    // (e.g. PipeWire passthrough, ALSA surround plugins) not real 5.1 hardware.
+    fn is_honest_hardware(d: &cpal::Device) -> bool {
+        max_channels(d) <= 8
+    }
+
+    // "nvidia" is always GPU HDMI/DP audio on Linux — no NVidia analog or USB
+    // audio cards exist. "intel" is intentionally excluded: hw:CARD=Intel,DEV=0
+    // is typically the analog/headphone output; only DEV=3+ are HDMI, and we
+    // cannot distinguish them by card name alone.
+    fn is_hdmi_or_dp(name: &str) -> bool {
         let n = name.to_ascii_lowercase();
-        n.contains("hdmi") || n.contains("displayport") || n.contains("dp,")
-            || n.contains("nvidia") || n.contains("intel")
+        n.contains("hdmi") || n.contains("displayport") || n.contains("dp,") || n.contains("nvidia")
     }
 
     println!("[device] Available output devices:");
     for d in &devices {
         let name = d.name().unwrap_or_else(|_| "<unknown>".into());
-        let ch = max_channels(&d);
-        let ok = if supports_6ch_at_rate(&d) { "6ch@96k OK" } else { "       ---" };
-        println!("[device]   {ok}  max={ch}ch  {name}");
+        let ch = max_channels(d);
+        let rates: Vec<u32> = PREFERRED_RATES
+            .iter()
+            .filter(|&&r| supports_6ch_at_rate(d, r))
+            .copied()
+            .collect();
+        let honest = is_honest_hardware(d);
+        let hdmi = is_hdmi_or_dp(&name);
+        println!("[device]   max={ch}ch  honest={honest}  hdmi={hdmi}  rates={rates:?}  {name}");
     }
 
+    // If a specific device is configured, honour it and select the best rate.
     if !DEVICE_NAME.is_empty() {
-        if devices.iter().any(|d| d.name().map(|n| n == DEVICE_NAME).unwrap_or(false)) {
-            println!("[device] Using configured DEVICE_NAME: {}", DEVICE_NAME);
-            return devices.into_iter()
-                .find(|d| d.name().map(|n| n == DEVICE_NAME).unwrap_or(false))
-                .unwrap();
+        if let Some(d) = devices
+            .iter()
+            .find(|d| d.name().map(|n| n == DEVICE_NAME).unwrap_or(false))
+        {
+            for &rate in PREFERRED_RATES {
+                if supports_6ch_at_rate(d, rate) {
+                    let name = d.name().unwrap_or_default();
+                    println!("[device] Using configured DEVICE_NAME: {DEVICE_NAME} @ {rate}Hz");
+                    return devices
+                        .into_iter()
+                        .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+                        .map(|d| (d, rate));
+                }
+            }
+            eprintln!("[device] Warning: DEVICE_NAME '{DEVICE_NAME}' does not support 6ch, falling back");
+        } else {
+            eprintln!("[device] Warning: DEVICE_NAME '{DEVICE_NAME}' not found, falling back");
         }
-        eprintln!("[device] Warning: DEVICE_NAME '{}' not found, falling back", DEVICE_NAME);
     }
 
-    let take = |devices: Vec<cpal::Device>, name: &str| -> cpal::Device {
-        devices.into_iter()
-            .find(|d| d.name().map(|n| n == name).unwrap_or(false))
-            .unwrap()
-    };
-
-    // Prefer non-hw: devices (pipewire, pulse, default) — they go through a plug
-    // layer that handles real hardware constraints (e.g. USB bandwidth limiting
-    // channel count at high sample rates) without exposing them to us.
-    if let Some(d) = devices.iter().find(|d| {
-        d.name().map(|n| !n.starts_with("hw:") && !is_hdmi(&n) && supports_6ch_at_rate(d))
-            .unwrap_or(false)
-    }) {
-        let name = d.name().unwrap_or_default();
-        println!("[device] Auto-selected: {name}");
-        return take(devices, &name);
+    // Priority 1: non-hw: devices (PipeWire, Pulse, default), non-HDMI, with 6ch.
+    // These route to real hardware transparently and are the correct way to reach
+    // ALSA devices that PipeWire holds exclusively (e.g. the integrated ALC1220).
+    // The is_honest_hardware filter is NOT applied here — PipeWire legitimately
+    // reports 32ch max as its virtual routing capability, not because it is fake.
+    for &rate in PREFERRED_RATES {
+        if let Some(d) = devices.iter().find(|d| {
+            d.name()
+                .map(|n| {
+                    !n.starts_with("hw:")
+                        && !is_hdmi_or_dp(&n)
+                        && supports_6ch_at_rate(d, rate)
+                })
+                .unwrap_or(false)
+        }) {
+            let name = d.name().unwrap_or_default();
+            println!("[device] Auto-selected: {name} @ {rate}Hz");
+            return devices
+                .into_iter()
+                .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+                .map(|d| (d, rate));
+        }
     }
 
-    // Fall back to direct hw: devices (may fail if hardware has combined
-    // rate×channel constraints not captured by supported_output_configs).
-    if let Some(d) = devices.iter().find(|d| {
-        d.name().map(|n| n.starts_with("hw:") && !is_hdmi(&n) && supports_6ch_at_rate(d))
-            .unwrap_or(false)
-    }) {
-        let name = d.name().unwrap_or_default();
-        eprintln!("[device] Warning: using direct hw: device {name} — format negotiation may fail");
-        return take(devices, &name);
+    // Priority 2: honest hardware, direct hw: (may fail on combined rate×channel
+    // constraints not captured by supported_output_configs).
+    for &rate in PREFERRED_RATES {
+        if let Some(d) = devices.iter().find(|d| {
+            d.name()
+                .map(|n| {
+                    is_honest_hardware(d)
+                        && !is_hdmi_or_dp(&n)
+                        && n.starts_with("hw:")
+                        && supports_6ch_at_rate(d, rate)
+                })
+                .unwrap_or(false)
+        }) {
+            let name = d.name().unwrap_or_default();
+            eprintln!("[device] Warning: using direct hw: device {name} @ {rate}Hz — format negotiation may fail");
+            return devices
+                .into_iter()
+                .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+                .map(|d| (d, rate));
+        }
     }
 
-    if let Some(d) = devices.iter().find(|d| supports_6ch_at_rate(d)) {
-        let name = d.name().unwrap_or_default();
-        eprintln!("[device] Warning: only HDMI/DP 6ch device found, using: {name}");
-        return take(devices, &name);
+    // Priority 3: honest hardware that happens to be HDMI/DP (e.g. AV receiver
+    // connected via HDMI — a valid 5.1 sink).
+    for &rate in PREFERRED_RATES {
+        if let Some(d) = devices.iter().find(|d| {
+            is_honest_hardware(d) && supports_6ch_at_rate(d, rate)
+        }) {
+            let name = d.name().unwrap_or_default();
+            eprintln!("[device] Warning: only honest HDMI/DP 6ch device found: {name} @ {rate}Hz");
+            return devices
+                .into_iter()
+                .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+                .map(|d| (d, rate));
+        }
     }
 
-    eprintln!("[device] Warning: no 6-channel device found - set DEVICE_NAME in config.rs");
-    host.default_output_device().expect("No output device available")
+    eprintln!("[device] Error: no real 6-channel hardware device found.");
+    eprintln!("[device] All devices with 6ch support appear to be virtual (>8ch max).");
+    eprintln!("[device] Set DEVICE_NAME in config.rs to override.");
+    None
 }
