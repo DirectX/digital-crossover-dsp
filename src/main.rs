@@ -9,7 +9,7 @@ mod tui;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use clap::{Parser, Subcommand};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use config::{AppState, AudioRuntimeConfig};
@@ -42,18 +42,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let initial_config = AudioRuntimeConfig::default();
             let (config_tx, config_rx) = watch::channel(initial_config);
 
-            let (fft_tx, _fft_rx) = broadcast::channel::<String>(16);
+            #[cfg(feature = "fft")]
+            let (fft_tx, _fft_rx) = tokio::sync::broadcast::channel::<String>(16);
 
             metadata::spawn_thread(token.clone(), state.clone());
 
             let dsp_token = token.clone();
             let dsp_state = state.clone();
+            #[cfg(feature = "fft")]
             let dsp_fft_tx = fft_tx.clone();
             let dsp_handle = thread::spawn(move || {
-                dsp::run(dsp_token, config_rx, dsp_state, dsp_fft_tx);
+                dsp::run(
+                    dsp_token,
+                    config_rx,
+                    dsp_state,
+                    #[cfg(feature = "fft")]
+                    dsp_fft_tx,
+                );
             });
 
-            server::spawn(token.clone(), config_tx, state.clone(), fft_tx).await;
+            server::spawn(
+                token.clone(),
+                config_tx,
+                state.clone(),
+                #[cfg(feature = "fft")]
+                fft_tx,
+            ).await;
 
             tokio::signal::ctrl_c().await?;
             println!("\nShutdown signal received...");

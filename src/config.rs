@@ -13,9 +13,11 @@ pub const P_GAIN: f64 = 0.002;
 pub const I_GAIN: f64 = 0.00005;
 pub const POLL_TIMEOUT_MS: i32 = 200;
 
+#[cfg(feature = "fft")]
 /// Number of samples per FFT window. Positive-frequency bins = FFT_SIZE / 2.
 pub const FFT_SIZE: usize = 2048;
 
+#[cfg(feature = "fft")]
 /// Pre-serialised JSON payload broadcast to WebSocket clients each FFT frame.
 /// Using a `String` avoids re-serialising per-client.
 pub type FftBroadcast = tokio::sync::broadcast::Sender<String>;

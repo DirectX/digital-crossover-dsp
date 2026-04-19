@@ -3,6 +3,9 @@ name = "digital-crossover-dsp"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+fft = ["rustfft"]
+
 [dependencies]
 cpal = "0.15"
 rtrb = "0.3"
@@ -18,6 +21,6 @@ clap = { version = "4", features = ["derive"] }
 ratatui = "0.29"
 crossterm = "0.28"
 reqwest = { version = "0.12", features = ["json"] }
-rustfft = "6"
+rustfft = { version = "6", optional = true }
 tokio-tungstenite = "0.29"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }

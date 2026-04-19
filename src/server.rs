@@ -1,19 +1,22 @@
 use axum::{
     Json, Router,
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
     routing::{get, post},
 };
+#[cfg(feature = "fft")]
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::{AudioRuntimeConfig, FftBroadcast, SharedState};
+use crate::config::{AudioRuntimeConfig, SharedState};
+#[cfg(feature = "fft")]
+use crate::config::FftBroadcast;
 
 pub async fn spawn(
     token: CancellationToken,
     config_tx: watch::Sender<AudioRuntimeConfig>,
     state: SharedState,
-    fft_tx: FftBroadcast,
+    #[cfg(feature = "fft")] fft_tx: FftBroadcast,
 ) {
     let app = Router::new()
         .route(
@@ -45,17 +48,19 @@ pub async fn spawn(
                     Json(s)
                 }
             }),
-        )
-        .route(
-            "/ws/fft",
-            get({
-                let fft_tx = fft_tx.clone();
-                move |ws: WebSocketUpgrade| {
-                    let rx = fft_tx.subscribe();
-                    async move { ws.on_upgrade(move |socket| handle_fft_ws(socket, rx)) }
-                }
-            }),
         );
+
+    #[cfg(feature = "fft")]
+    let app = app.route(
+        "/ws/fft",
+        get({
+            let fft_tx = fft_tx.clone();
+            move |ws: WebSocketUpgrade| {
+                let rx = fft_tx.subscribe();
+                async move { ws.on_upgrade(move |socket| handle_fft_ws(socket, rx)) }
+            }
+        }),
+    );
 
     let listener = TcpListener::bind("0.0.0.0:3000")
         .await
@@ -70,6 +75,7 @@ pub async fn spawn(
     });
 }
 
+#[cfg(feature = "fft")]
 async fn handle_fft_ws(mut socket: WebSocket, mut rx: tokio::sync::broadcast::Receiver<String>) {
     loop {
         match rx.recv().await {
