@@ -108,7 +108,7 @@ make install
 git clone https://github.com/mikebrady/shairport-sync.git
 cd shairport-sync
 autoreconf -fi
-./configure --sysconfdir=/etc --with-alsa --with-soxr --with-avahi --with-ssl=openssl --with-systemd-startup --with-airplay-2 --with-pipe --with-metadata
+./configure --sysconfdir=/etc --with-soxr --with-avahi --with-ssl=openssl --with-systemd-startup --with-airplay-2 --with-pipe --with-metadata --without-alsa
 make
 sudo make install
 ```
@@ -141,17 +141,14 @@ sudo nano /etc/shairport-sync.conf
 
 /etc/shairport-sync.conf
 ```
-eneral = {
+general = {
   name = "Digital Crossover";
   ignore_volume_control = "yes";
-};
-
-alsa = {
-  // Disabling system audio output
+  output_backend = "pipe";
 };
 
 pipe = {
-  name = "/tmp/shairport-sync-audio";  // UNIX pipe path
+  name = "/tmp/shairport-sync-audio";                   
 };
 
 metadata =

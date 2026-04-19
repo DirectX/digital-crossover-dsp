@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
 pub const INPUT_RATE: u32 = 48000;
-pub const OUTPUT_RATE: u32 = 96000;
+pub const OUTPUT_RATE: u32 = 48000;
 pub const CHANNELS: usize = 2;
 pub const OUTPUT_CHANNELS: usize = 6;
 pub const PIPE_PATH: &str = "/tmp/shairport-sync-audio";
@@ -21,10 +21,18 @@ pub const POLL_TIMEOUT_MS: i32 = 200;
 /// avoid LFE/surround resampling. Empty string = auto-detect first suitable device.
 pub const DEVICE_NAME: &str = "";
 
-fn default_master_volume() -> f32 { 1.0 }
-fn default_band_gain() -> f32 { 1.0 }
-fn default_low_cut() -> f32 { 1000.0 }
-fn default_mid_cut() -> f32 { 10000.0 }
+fn default_master_volume() -> f32 {
+    1.0
+}
+fn default_band_gain() -> f32 {
+    1.0
+}
+fn default_low_cut() -> f32 {
+    1000.0
+}
+fn default_mid_cut() -> f32 {
+    10000.0
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AudioRuntimeConfig {
