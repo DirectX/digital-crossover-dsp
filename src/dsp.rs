@@ -63,6 +63,12 @@ pub fn run(
     let buffer_capacity: usize = output_rate as usize * OUTPUT_CHANNELS * 2;
     let base_ratio: f64 = output_rate as f64 / INPUT_RATE as f64;
 
+    {
+        let mut s = state.lock().unwrap();
+        s.output_rate = output_rate;
+        s.output_format = format!("{:?}", sample_format);
+    }
+
     macro_rules! build_stream {
         ($T:ty, $consumer:expr) => {{
             let mut consumer = $consumer;

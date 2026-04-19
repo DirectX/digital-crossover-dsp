@@ -27,7 +27,7 @@ install:
 	@echo "📦 Installing $(BIN_NAME) to $(BINDIR)..."
 	install -Dm755 target/release/$(BIN_NAME) $(BINDIR)/$(BIN_NAME)
 	@echo "⚙️  Installing systemd service to $(SYSTEMD_DIR)/$(SERVICE)..."
-	@printf '[Unit]\nDescription=%s service\nAfter=network.target shairport-sync.service\nRequires=shairport-sync.service\n\n[Service]\nType=simple\nUser=%s\nGroup=%s\nExecStart=%s/%s run\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n' \
+	@printf '[Unit]\nDescription=%s service\nAfter=network.target shairport-sync.service\nRequires=shairport-sync.service\n\n[Service]\nType=simple\nUser=%s\nGroup=%s\nExecStart=%s/%s serve\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n' \
 		"$(BIN_NAME)" "$(SERVICE_USER)" "$(SERVICE_GROUP)" "$(BINDIR)" "$(BIN_NAME)" \
 		> $(SYSTEMD_DIR)/$(SERVICE)
 	systemctl daemon-reload

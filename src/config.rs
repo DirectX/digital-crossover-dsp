@@ -74,6 +74,8 @@ pub struct AppState {
     pub buffer_fill_max: f64,
     pub resample_ratio: f64,
     pub chunks_processed: u64,
+    pub output_rate: u32,
+    pub output_format: String,
 }
 
 pub type SharedState = Arc<Mutex<AppState>>;

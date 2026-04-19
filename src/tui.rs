@@ -25,6 +25,8 @@ struct Status {
     buffer_fill_max: f64,
     resample_ratio: f64,
     chunks_processed: u64,
+    output_rate: u32,
+    output_format: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -310,12 +312,12 @@ fn draw_ui(
     f.render_widget(meta, chunks[1]);
 
     let fill_ratio = (status.buffer_fill / 100.0).clamp(0.0, 1.0);
-    let fill_color = if status.buffer_fill < 30.0 {
-        Color::Red
-    } else if status.buffer_fill < 70.0 {
+    let fill_color = if (40.0..=60.0).contains(&status.buffer_fill) {
+        Color::Green
+    } else if (20.0..=80.0).contains(&status.buffer_fill) {
         Color::Yellow
     } else {
-        Color::Green
+        Color::Red
     };
 
     let gauge = Gauge::default()
@@ -333,6 +335,17 @@ fn draw_ui(
             "  Resample ratio: {:.6}  Chunks: {}",
             status.resample_ratio, status.chunks_processed
         )),
+        Line::from(vec![
+            Span::styled("  Output: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                if status.output_rate > 0 {
+                    format!("{} Hz · {} · 6ch", status.output_rate, status.output_format)
+                } else {
+                    "—".to_string()
+                },
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
     ])
     .block(Block::default().title(" DSP Stats ").borders(Borders::ALL));
 

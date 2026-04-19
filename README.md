@@ -1,5 +1,7 @@
 # Digital Crossover DSP
 
+![TUI](img/tui.png)
+
 ## Overview
 
 ```mermaid
