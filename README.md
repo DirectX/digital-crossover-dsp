@@ -85,6 +85,12 @@ apt install --no-install-recommends build-essential git autoconf automake libtoo
     libavutil-dev libavcodec-dev libavformat-dev systemd-dev
 ```
 
+##### Rust
+
+```
+
+```
+
 ##### NQPTP
 
 ```
@@ -136,7 +142,7 @@ sudo nano /etc/shairport-sync.conf
 /etc/shairport-sync.conf
 ```
 eneral = {
-  name = "My AirPlay";
+  name = "Digital Crossover";
   ignore_volume_control = "yes";
 };
 
@@ -163,7 +169,7 @@ systemctl --user start shairport-sync
 systemctl --user status shairport-sync
 ```
 
-#### Testing (possible jitter)
+#### Testing
 
 ```
 ffplay -fflags nobuffer -f s32le -ar 48000 -ch_layout stereo /tmp/shairport-sync-audio
@@ -176,6 +182,15 @@ aplay -f S32_LE -r 48000 -c 2 /tmp/shairport-sync-audio
 ```
 # sudo apt install sox
 play -t raw --buffer 8192 -r 48000 -e signed -b 32 -c 2 -L /tmp/shairport-sync-audio
+```
+
+## Installation
+
+```
+git clone https://github.com/DirectX/digital-crossover-dsp.git
+cd digital-crossover-dsp
+make
+sudo make install
 ```
 
 ### Architecture
