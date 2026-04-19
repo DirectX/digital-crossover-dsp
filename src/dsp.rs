@@ -278,68 +278,68 @@ pub fn run(
                 }
             };
 
-            // let out_frames = output[0].len();
-            // 'frame_loop: for frame in 0..out_frames {
-            //     let l = output[0][frame] as f32;
-            //     let r = if CHANNELS > 1 {
-            //         output[1][frame] as f32
-            //     } else {
-            //         l
-            //     };
+            let out_frames = output[0].len();
+            'frame_loop: for frame in 0..out_frames {
+                let l = output[0][frame] as f32;
+                let r = if CHANNELS > 1 {
+                    output[1][frame] as f32
+                } else {
+                    l
+                };
 
-            //     let six = crossover.process(l, r);
+                let six = crossover.process(l, r);
 
-            //     // Accumulate mono mix for FFT
-            //     let mono = (l + r) * 0.5;
-            //     fft_buf.push(mono);
-            //     if fft_buf.len() == FFT_SIZE {
-            //         // Apply Hann window and convert to complex
-            //         let mut fft_in: Vec<Complex<f32>> = fft_buf
-            //             .iter()
-            //             .zip(hann.iter())
-            //             .map(|(&s, &w)| Complex { re: s * w, im: 0.0 })
-            //             .collect();
+                // Accumulate mono mix for FFT
+                let mono = (l + r) * 0.5;
+                fft_buf.push(mono);
+                if fft_buf.len() == FFT_SIZE {
+                    // Apply Hann window and convert to complex
+                    let mut fft_in: Vec<Complex<f32>> = fft_buf
+                        .iter()
+                        .zip(hann.iter())
+                        .map(|(&s, &w)| Complex { re: s * w, im: 0.0 })
+                        .collect();
 
-            //         fft_plan.process_outofplace_with_scratch(
-            //             &mut fft_in,
-            //             &mut fft_out,
-            //             &mut fft_scratch,
-            //         );
+                    fft_plan.process_outofplace_with_scratch(
+                        &mut fft_in,
+                        &mut fft_out,
+                        &mut fft_scratch,
+                    );
 
-            //         // Build magnitude array (positive frequencies only, dB)
-            //         let bins = FFT_SIZE / 2;
-            //         let scale = 2.0 / FFT_SIZE as f32;
-            //         let magnitudes: Vec<f32> = fft_out[..bins]
-            //             .iter()
-            //             .map(|c| {
-            //                 let mag = c.norm() * scale;
-            //                 20.0 * mag.max(1e-9).log10()
-            //             })
-            //             .collect();
+                    // Build magnitude array (positive frequencies only, dB)
+                    let bins = FFT_SIZE / 2;
+                    let scale = 2.0 / FFT_SIZE as f32;
+                    let magnitudes: Vec<f32> = fft_out[..bins]
+                        .iter()
+                        .map(|c| {
+                            let mag = c.norm() * scale;
+                            20.0 * mag.max(1e-9).log10()
+                        })
+                        .collect();
 
-            //         let json = serde_json::json!({
-            //             "type": "fft",
-            //             "bins": magnitudes,
-            //             "sample_rate": output_rate,
-            //             "fft_size": FFT_SIZE,
-            //         })
-            //         .to_string();
+                    let json = serde_json::json!({
+                        "type": "fft",
+                        "bins": magnitudes,
+                        "sample_rate": output_rate,
+                        "fft_size": FFT_SIZE,
+                    })
+                    .to_string();
 
-            //         let _ = fft_tx.send(json);
+                    let _ = fft_tx.send(json);
 
-            //         // 50% overlap: keep the second half for the next window
-            //         let half = FFT_SIZE / 2;
-            //         fft_buf.drain(..half);
-            //     }
+                    // 50% overlap: keep the second half for the next window
+                    let half = FFT_SIZE / 2;
+                    fft_buf.drain(..half);
+                }
 
-            //     for &sample in &six {
-            //         let clamped = sample.clamp(-1.0, 1.0);
-            //         if producer.push(clamped).is_err() {
-            //             eprintln!("[buf] overflow, dropping samples");
-            //             break 'frame_loop;
-            //         }
-            //     }
-            // }
+                for &sample in &six {
+                    let clamped = sample.clamp(-1.0, 1.0);
+                    if producer.push(clamped).is_err() {
+                        eprintln!("[buf] overflow, dropping samples");
+                        break 'frame_loop;
+                    }
+                }
+            }
         }
     }
 }
