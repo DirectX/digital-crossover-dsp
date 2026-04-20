@@ -192,6 +192,13 @@ make
 sudo make install
 ```
 
+## FFT Feature
+
+```
+cargo build --features fft
+cargo run --features fft -- serve
+```
+
 ### Architecture
 
 Reader/resampler thread:
